@@ -11,7 +11,7 @@
 # Enable debug logging to .autopilot/tmp/debug.log (implies verbose)
 # AUTOPILOT_DEBUG=0
 
-# Maximum Claude turns per phase
+# Legacy prompt budget kept for compatibility
 # MAX_TURNS=80
 
 # Seconds between CI/Copilot status polls
@@ -32,7 +32,7 @@
 # =============================================================================
 # EXECUTION MODE
 # =============================================================================
-# All modes auto-continue: after creating PR, immediately start next epic.
+# All modes auto-continue: after creating PR, immediately start the next active epic from sprint status.
 # PR reviews run in background, auto-merged when approved, or paused for fixes.
 #
 # PARALLEL_MODE controls worktree usage:

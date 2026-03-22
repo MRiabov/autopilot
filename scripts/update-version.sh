@@ -6,7 +6,6 @@
 #
 # Updates:
 # - scripts/bmad-autopilot.sh (AUTOPILOT_VERSION variable)
-# - install.sh (display version)
 # - README.md (version badge)
 #
 # Usage: ./scripts/update-version.sh
@@ -60,19 +59,6 @@ AUTOPILOT_VERSION=\"$VERSION\"
     echo -e "  ${GREEN}✓${NC} Updated $MAIN_SCRIPT"
 fi
 
-# ==================== Install Script ====================
-echo "Updating install script..."
-INSTALL_SCRIPT="$ROOT_DIR/install.sh"
-if [[ -f "$INSTALL_SCRIPT" ]]; then
-    # Update or add version display
-    if grep -q '^AUTOPILOT_VERSION=' "$INSTALL_SCRIPT"; then
-        sed "s/^AUTOPILOT_VERSION=.*/AUTOPILOT_VERSION=\"$VERSION\"/" "$INSTALL_SCRIPT" > "$INSTALL_SCRIPT.tmp"
-        mv "$INSTALL_SCRIPT.tmp" "$INSTALL_SCRIPT"
-        chmod +x "$INSTALL_SCRIPT"
-    fi
-    echo -e "  ${GREEN}✓${NC} Updated $INSTALL_SCRIPT"
-fi
-
 echo ""
 echo -e "${GREEN}Version synchronization complete!${NC}"
 echo ""
@@ -81,4 +67,4 @@ echo "  Version: $VERSION"
 echo ""
 echo "Files updated:"
 echo "  - scripts/bmad-autopilot.sh"
-echo "  - install.sh"
+echo "  - README.md"
