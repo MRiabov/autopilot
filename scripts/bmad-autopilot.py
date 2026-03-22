@@ -32,6 +32,7 @@ class Phase(str, Enum):
     FIND_EPIC = "FIND_EPIC"
     CREATE_BRANCH = "CREATE_BRANCH"
     DEVELOP_STORIES = "DEVELOP_STORIES"
+    COMMIT_SPLIT = "COMMIT_SPLIT"
     QA_AUTOMATION_TEST = "QA_AUTOMATION_TEST"
     CODE_REVIEW = "CODE_REVIEW"
     CREATE_PR = "CREATE_PR"
@@ -298,6 +299,10 @@ def write_text(path: Path, text: str) -> None:
 
 
 class AutopilotRunner:
+    codex_model = "gpt-5.4-mini"
+    codex_reasoning_effort = "xhigh"
+    commit_split_reasoning_effort = "low"
+
     allowed_config_keys = {
         "AUTOPILOT_DEBUG",
         "AUTOPILOT_VERBOSE",
@@ -585,11 +590,19 @@ class AutopilotRunner:
         output_file: Path | None = None,
         *,
         cwd: Path | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> int:
-        self.log("🤖 Codex exec")
+        selected_model = model or self.codex_model
+        selected_reasoning_effort = reasoning_effort or self.codex_reasoning_effort
+        self.log(f"🤖 Codex exec ({selected_model}, reasoning={selected_reasoning_effort})")
         command = [
             "codex",
             "exec",
+            "-c",
+            f"model={json.dumps(selected_model)}",
+            "-c",
+            f"model_reasoning_effort={json.dumps(selected_reasoning_effort)}",
             "--dangerously-bypass-approvals-and-sandbox",
             "--cd",
             str(cwd or self.project_root),
@@ -1042,7 +1055,53 @@ class AutopilotRunner:
         return "$integration-tests-workflow\n"
 
     def build_code_review_prompt(self, epic_id: str) -> str:
-        return "$bmad-code-review\n"
+        current_branch = self.run_text(["git", "branch", "--show-current"], cwd=self.project_root, check=False, capture_output=True).strip()
+        branch_diff = self.run_text(
+            ["git", "diff", "--name-only", f"origin/{self.base_branch}..HEAD"],
+            cwd=self.project_root,
+            check=False,
+            capture_output=True,
+        ).strip()
+        working_tree = self.run_text(["git", "status", "--short"], cwd=self.project_root, check=False, capture_output=True).strip()
+        return dedent(
+            f"""
+            $bmad-code-review
+
+            Review target:
+            - Epic: {epic_id}
+            - Branch: {current_branch or f'feature/epic-{epic_id}'}
+            - Base branch: origin/{self.base_branch}
+            - Source: branch diff vs origin/{self.base_branch}
+
+            Changed files:
+            {branch_diff or "(none)"}
+
+            Working tree status:
+            {working_tree or "(clean)"}
+
+            Review the branch diff first. If the tree is clean, review the latest commits on the branch.
+            Do not ask for a diff source; use the context above.
+            """
+        ).strip() + "\n"
+
+    def build_commit_split_prompt(self, epic_id: str) -> str:
+        current_branch = self.run_text(["git", "branch", "--show-current"], cwd=self.project_root, check=False, capture_output=True).strip()
+        working_tree = self.run_text(["git", "status", "--short"], cwd=self.project_root, check=False, capture_output=True).strip()
+        return dedent(
+            f"""
+            $commit-split-workflow
+
+            Context:
+            - Epic: {epic_id}
+            - Branch: {current_branch or f'feature/epic-{epic_id}'}
+            - Goal: split the current story implementation into small, reviewable commits.
+
+            Working tree status:
+            {working_tree or "(clean)"}
+
+            Use the repository's commit-message conventions and make the commit history easy to review.
+            """
+        ).strip() + "\n"
 
     def build_fix_issues_prompt(self, issues: str) -> str:
         return dedent(
@@ -1290,8 +1349,35 @@ class AutopilotRunner:
         except Exception as exc:
             self.log(f"⚠️ Local checks failed after story development: {exc}")
 
+        self.state_set(Phase.COMMIT_SPLIT, epic_id)
+        self.log("✅ Stories phase complete; running commit split workflow next")
+
+    def phase_commit_split(self) -> None:
+        self.log("🪓 PHASE: COMMIT_SPLIT")
+        epic_id = self.state_current_epic()
+        if not epic_id:
+            self.log("❌ current_epic missing")
+            self.state_set(Phase.BLOCKED, None)
+            return
+
+        output_file = self.tmp_dir / "commit-split-output.txt"
+        return_code = self.run_codex_exec(
+            self.build_commit_split_prompt(epic_id),
+            output_file,
+            cwd=self.project_root,
+            model=self.codex_model,
+            reasoning_effort=self.commit_split_reasoning_effort,
+        )
+        output_text = read_text(output_file)
+        if return_code != 0:
+            self.log("❌ Codex reported commit split failed")
+            if output_text.strip():
+                self.verbose(output_text.strip())
+            self.state_set(Phase.BLOCKED, epic_id)
+            return
+
+        self.log("✅ Commit split workflow complete")
         self.state_set(Phase.QA_AUTOMATION_TEST, epic_id)
-        self.log("✅ Stories phase complete")
 
     def phase_qa_automation_test(self) -> None:
         self.log("🧪 PHASE: QA_AUTOMATION_TEST")
@@ -1677,6 +1763,8 @@ class AutopilotRunner:
             self.phase_create_branch()
         elif phase == Phase.DEVELOP_STORIES:
             self.phase_develop_stories()
+        elif phase == Phase.COMMIT_SPLIT:
+            self.phase_commit_split()
         elif phase == Phase.QA_AUTOMATION_TEST:
             self.phase_qa_automation_test()
         elif phase == Phase.CODE_REVIEW:
