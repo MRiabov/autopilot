@@ -2,40 +2,22 @@
 
 ## Common Issues
 
-### 1. "Required command not found"
+### 1. Required command not found
 
-**Error:**
-```
-❌ Required command not found: claude
-```
+If the launcher says a command is missing, install the missing prerequisite and retry.
 
-**Solution:**
-Install the missing command:
+Typical requirements:
 
-```bash
-# jq
-brew install jq
+- `python3`
+- `codex`
+- `gh`
+- `git`
 
-# gh (GitHub CLI)
-brew install gh
-gh auth login
+### 2. Git working tree not clean
 
-# ripgrep
-brew install ripgrep
+The runner warns before it starts if the repo has uncommitted changes.
 
-# Claude Code CLI
-# Follow: https://docs.anthropic.com/en/docs/claude-code
-```
-
-### 2. "Git working tree not clean"
-
-**Error:**
-```
-❌ Git working tree not clean
-```
-
-**Solution:**
-Commit or stash your changes:
+Fix:
 
 ```bash
 git add -A && git commit -m "wip"
@@ -43,200 +25,128 @@ git add -A && git commit -m "wip"
 git stash
 ```
 
-### 3. Autopilot Gets Stuck Waiting for Copilot
+### 3. Autopilot gets stuck waiting for Copilot
 
-**Symptoms:**
-- Log shows: `… waiting for Copilot to review (50)`
-- Copilot never comments
+Symptoms:
 
-**Debug:**
-Check what comments/reviews exist:
+- The log shows repeated `waiting for Copilot` messages.
+- No Copilot review appears on the PR.
+
+Check what reviews and comments exist:
 
 ```bash
-gh pr view --json comments,reviews | jq '.comments[].author.login, .reviews[].author.login'
+gh pr view --json comments,reviews
 ```
 
-**Possible causes:**
-1. Copilot not enabled for the repository
-2. Copilot's author login is different than expected
+Possible causes:
 
-**Solution:**
-Check the DEBUG logs in `.autopilot/autopilot.log` to see what authors are being detected.
+1. Copilot is not enabled for the repository.
+2. The PR review author login does not contain `copilot`.
 
-### 4. Copilot Reviews But Autopilot Doesn't See It
+### 4. Copilot reviewed but the runner does not see it
 
-**Symptoms:**
-- Copilot has commented on the PR
-- Autopilot keeps waiting
+Inspect the latest Copilot payload:
 
-**Debug:**
 ```bash
-# Check what the autopilot detected
-cat .autopilot/tmp/copilot_latest.json | jq
+cat .autopilot/tmp/copilot_latest.json
 ```
 
-**Solution:**
-The script checks for author login containing "copilot" (case-insensitive). If Copilot uses a different username, update the jq filter in `phase_wait_copilot()`.
+If the author login or review state differs from the repository's current Copilot behavior, update the review-detection logic in the Python runner.
 
-### 5. "No more epics - ALL DONE" Too Early
+### 5. No active epics too early
 
-**Symptoms:**
-- Autopilot completes but didn't process all epics
-- Epics exist in epics.md
+Symptoms:
 
-**Debug:**
+- The runner exits with `No more active epics in sprint-status.yaml and no pending PRs - ALL DONE`
+- Active epics still exist in `_bmad-output/implementation-artifacts/sprint-status.yaml`
+
+Check sprint queue parsing:
+
 ```bash
-# Check what epics are being parsed
-cd /your/project
-rg -N '^#### Epic ' _bmad-output/epics*.md
+python3 - <<'PY'
+from pathlib import Path
+import yaml
+data = yaml.safe_load(Path('_bmad-output/implementation-artifacts/sprint-status.yaml').read_text())
+print([key for key, value in data['development_status'].items() if key.startswith('epic-') and value not in {'backlog', 'done'}])
+PY
 ```
 
-**Possible causes:**
-1. Epic format doesn't match expected pattern
-2. Epics already in `completed_epics` array
+If the state file is stale, reset it:
 
-**Solution:**
 ```bash
-# Reset state
 rm .autopilot/state.json
-
-# Run again
 ./.autopilot/bmad-autopilot.sh
 ```
 
-### 6. State Corruption
+### 6. State corruption
 
-**Symptoms:**
-- Autopilot errors with JSON parsing issues
-- Unexpected phase transitions
+If `.autopilot/state.json` becomes invalid or the phase machine looks wrong:
 
-**Solution:**
 ```bash
-# View current state
-cat .autopilot/state.json
-
-# Reset if corrupted
 rm .autopilot/state.json
-
-# Start fresh
 ./.autopilot/bmad-autopilot.sh
 ```
 
-### 7. Multiple Open PRs Accumulated
+### 7. Multiple open PRs accumulated
 
-**Symptoms:**
-- Multiple `feature/epic-*` PRs are open
-- Autopilot was interrupted multiple times
+The runner is designed to resume open `feature/epic-*` PRs before starting new epics. If you interrupt it repeatedly, re-run the launcher and it should pick up the first open PR automatically.
 
-**Solution:**
-The autopilot now handles this automatically - it will process open PRs before starting new epics. Run:
+### 8. CI checks never pass
+
+Check the latest CI and review output:
 
 ```bash
-./.autopilot/bmad-autopilot.sh
-```
-
-It will resume the first open epic PR it finds.
-
-### 8. CI Checks Never Pass
-
-**Symptoms:**
-- Stuck in WAIT_CHECKS phase
-- CI keeps failing
-
-**Debug:**
-```bash
-# Check CI status
 gh pr checks
-
-# View failed checks
-cat .autopilot/tmp/failed-checks.json | jq
+cat .autopilot/tmp/failed-checks.json
 ```
 
-**Solution:**
-1. Fix CI issues manually
-2. Push the fix
-3. Resume: `./.autopilot/bmad-autopilot.sh --continue`
+If the runner has already merged a PR but the repo looks stale locally, re-run the launcher so it can sync the base branch.
 
-### 9. Claude Runs Out of Turns
+### 9. Codex stops before finishing a phase
 
-**Symptoms:**
-- Phase completes but work is incomplete
-- Log shows max-turns reached
+If a Codex phase finishes without the expected status marker, inspect the matching output file:
 
-**Solution:**
-Increase MAX_TURNS:
+- `develop-stories-output.txt`
+- `qa-automation-output.txt`
+- `code-review-output.txt`
+- `fix-issues-output.txt`
+- `retrospective-output.txt`
 
-```bash
-MAX_TURNS=150 ./.autopilot/bmad-autopilot.sh --continue
-```
+Then rerun the launcher with `--continue`.
 
-### 10. Permission Denied on Script
+### 10. Permission denied on script
 
-**Error:**
-```
--bash: ./.autopilot/bmad-autopilot.sh: Permission denied
-```
-
-**Solution:**
 ```bash
 chmod +x ./.autopilot/bmad-autopilot.sh
 ```
 
 ## Debugging Tips
 
-### Enable Verbose Logging
-
-The script already logs to `.autopilot/autopilot.log`. For real-time viewing:
+### Enable verbose logging
 
 ```bash
-# In one terminal
-./.autopilot/bmad-autopilot.sh
-
-# In another terminal
+./.autopilot/bmad-autopilot.sh --verbose
 tail -f .autopilot/autopilot.log
 ```
 
-### Check Temporary Files
+### Manual state transitions
 
 ```bash
-ls -la .autopilot/tmp/
-
-# View Copilot detection
-cat .autopilot/tmp/copilot_latest.json | jq
-
-# View Claude output
-cat .autopilot/tmp/claude-output.txt | head -100
-```
-
-### Manual State Transitions
-
-For testing, you can manually set the state:
-
-```bash
-# Skip to a specific phase
-echo '{"phase":"CREATE_PR","current_epic":"7A","completed_epics":[]}' > .autopilot/state.json
+echo '{"mode":"sequential","phase":"CREATE_PR","current_epic":"1","completed_epics":[],"pending_prs":[],"paused_context":null,"active_phase":null,"active_epic":null,"active_worktree":null}' > .autopilot/state.json
 ./.autopilot/bmad-autopilot.sh --continue
 ```
 
-### Run Individual Phases
+### Run individual phases
 
-You can source the script and run functions manually:
+The Python runner is easiest to inspect by calling it directly:
 
 ```bash
-source ./.autopilot/bmad-autopilot.sh
-
-# Initialize
-require_tooling
-state_init_if_missing
-
-# Run specific phase
-phase_find_epic
+python3 .autopilot/bmad-autopilot.py --help
 ```
 
 ## Getting Help
 
-1. Check the logs: `.autopilot/autopilot.log`
-2. Check temporary files: `.autopilot/tmp/`
-3. Check state: `.autopilot/state.json`
-4. Open an issue: https://github.com/hanibalsk/autopilot/issues
-
+1. Check `.autopilot/autopilot.log`
+2. Check `.autopilot/tmp/`
+3. Check `.autopilot/state.json`
+4. Open an issue in the autopilot repository

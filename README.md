@@ -2,249 +2,153 @@
 
 [![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](VERSION)
 
-**Autonomous Development Orchestrator for Claude Code**
+**Autonomous Development Orchestrator for Codex**
 
-BMAD Autopilot is a state-machine-driven bash orchestrator that automates the entire development cycle from epic selection to PR merge. It works with Claude Code CLI and GitHub Copilot to provide a fully autonomous development experience.
+BMAD Autopilot is a Python-driven state machine that automates the development cycle from epic selection to PR merge. It uses Codex for implementation, QA automation, code review, fix-up, and retrospectives, while GitHub CLI handles PRs, checks, and review state.
 
 ## Features
 
-- 🤖 **Fully Autonomous** - No human intervention required after starting
-- 🔄 **State Machine** - Resumable workflow that survives interruptions
-- 📋 **Multi-Epic Support** - Process all epics or filter by pattern
-- 🔍 **GitHub Copilot Integration** - Waits for reviews, fixes issues, replies to comments
-- ✅ **CI Integration** - Waits for checks, fixes failures automatically
-- 📝 **Detailed Logging** - Full audit trail in `.autopilot/autopilot.log`
-- 🔀 **Parallel Mode** - Work on next epic while waiting for PR review (experimental)
-- 🔒 **Secure Config** - Safe config parsing with whitelisted keys only
+- 🤖 Fully autonomous execution
+- 🔄 Resumable state machine
+- 📋 Multi-epic support with pattern filtering
+- 🧪 Dedicated QA automation phase for integration/E2E tests
+- 🔍 GitHub Copilot review handling and fix-up loops
+- ✅ CI integration and background merge monitoring
+- 🪞 Retrospective generation after merge
+- 📝 Detailed logging in `.autopilot/autopilot.log`
+- 🔀 Parallel mode with worktrees
+- 🔒 Safe config parsing with whitelisted keys
 
 ## Prerequisites
 
 Required tools:
-- `claude` - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
+
+- `python3` - runs the Python orchestration core
+- `codex` - OpenAI Codex CLI
 - `gh` - [GitHub CLI](https://cli.github.com/)
-- `jq` - JSON processor
-- `rg` - [ripgrep](https://github.com/BurntSushi/ripgrep)
 - `git` - Git version control
 
-## Installation
+Optional compatibility:
 
-### Quick Install
+- Legacy BMAD command templates in `.claude/` if you still use a command-based frontend
 
-```bash
-# Clone the repository
-git clone https://github.com/hanibalsk/autopilot.git
-cd autopilot
-
-# Run the install script
-./install.sh
-```
-
-### Manual Install
-
-1. Copy the main script to your project:
-
-```bash
-mkdir -p /your/project/.autopilot
-cp scripts/bmad-autopilot.sh /your/project/.autopilot/
-chmod +x /your/project/.autopilot/bmad-autopilot.sh
-```
-
-2. (Optional) Install Claude Code commands:
-
-```bash
-# Local installation (recommended)
-mkdir -p /your/project/.claude/commands
-cp commands/*.md /your/project/.claude/commands/
-
-# Or global installation
-mkdir -p ~/.claude/commands
-cp commands/*.md ~/.claude/commands/
-```
+This checkout is self-contained. The launcher already lives under `.autopilot/`.
 
 ## Usage
 
-### Basic Usage
-
 ```bash
-# From your project root:
-cd /path/to/your/project
-
-# Process ALL epics from _bmad-output/epics.md
+# Process all active epics from _bmad-output/implementation-artifacts/sprint-status.yaml
 ./.autopilot/bmad-autopilot.sh
 
-# Process specific epics only
-./.autopilot/bmad-autopilot.sh "7A 8A 10B"
+# Process only selected epics
+./.autopilot/bmad-autopilot.sh "1 2 3"
 
-# Process epic with suffix
-./.autopilot/bmad-autopilot.sh "10A-SSO"
-
-# Use regex patterns
-./.autopilot/bmad-autopilot.sh "10A.*"      # matches 10A, 10A-SSO, etc.
-./.autopilot/bmad-autopilot.sh "7.* 10.*"   # multiple patterns
-```
-
-### Resume After Interruption
-
-```bash
-# Resume from where it left off
+# Resume after interruption
 ./.autopilot/bmad-autopilot.sh --continue
 
-# Resume with specific pattern
-./.autopilot/bmad-autopilot.sh "7A" --continue
+# Enable verbose logging
+./.autopilot/bmad-autopilot.sh --verbose
 ```
 
-### Using Claude Code Commands
+## Workflow
 
-If you installed the Claude Code commands:
+The orchestrator runs these phases:
 
-```
-/autopilot           # process all epics
-/autopilot 7A 8A     # specific epics
-```
+`CHECK_PENDING_PR -> FIND_EPIC -> CREATE_BRANCH -> DEVELOP_STORIES -> QA_AUTOMATION_TEST -> CODE_REVIEW -> CREATE_PR`
 
-## Workflow State Machine
+Background work then monitors PRs:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  CHECK_PENDING_PR -> FIND_EPIC -> CREATE_BRANCH ->              │
-│  DEVELOP_STORIES -> CODE_REVIEW -> CREATE_PR ->                 │
-│  WAIT_COPILOT -> (add to pending) -> FIND_EPIC (next epic)     │
-│       │                                                         │
-│       ▼                                                         │
-│  FIX_ISSUES ◄─── (if unresolved threads exist)                 │
-│       │                                                         │
-│       └──────► WAIT_COPILOT (re-review after fixes)            │
-│                                                                 │
-│  Background: pending PRs auto-merged when approved              │
-└─────────────────────────────────────────────────────────────────┘
-```
+`WAIT_COPILOT -> FIX_ISSUES -> WAIT_COPILOT -> MERGE_PR -> RETROSPECTIVE -> CHECK_PENDING_PR`
 
-### Phase Descriptions
+The runner stays alive until the pending PR queue is empty, even after the last new epic has been discovered.
+
+### Phase Summary
 
 | Phase | Description |
 |-------|-------------|
-| `CHECK_PENDING_PR` | Look for unfinished PRs from previous runs |
-| `FIND_EPIC` | Find next epic from `_bmad-output/epics*.md` |
-| `CREATE_BRANCH` | Create `feature/epic-{ID}` branch |
-| `DEVELOP_STORIES` | Run BMAD dev-story workflow via Claude (interactive) |
-| `CODE_REVIEW` | Run BMAD code-review workflow, fix issues (interactive) |
-| `CREATE_PR` | Create PR, add to pending list, continue to next epic |
-| `WAIT_COPILOT` | Check Copilot review - if no issues, continue to next epic |
-| `FIX_ISSUES` | Fix issues, post reply, resolve threads, loop back |
-| `MERGE_PR` | Squash merge, delete branch, mark complete |
-| `DONE` | All epics processed! |
-| `BLOCKED` | Manual intervention needed |
+| `CHECK_PENDING_PR` | Resume unfinished PRs before starting new work |
+| `FIND_EPIC` | Find the next active epic from `_bmad-output/implementation-artifacts/sprint-status.yaml` |
+| `CREATE_BRANCH` | Create `feature/epic-{ID}` |
+| `DEVELOP_STORIES` | Run BMAD dev-story workflow via Codex |
+| `QA_AUTOMATION_TEST` | Add or update automated API/E2E tests, following the integration-test workflow |
+| `CODE_REVIEW` | Run BMAD code-review workflow via Codex |
+| `CREATE_PR` | Create PR, add it to the pending list, continue to the next epic |
+| `WAIT_COPILOT` | Wait for Copilot review and route to fixes if needed |
+| `FIX_ISSUES` | Fix CI/review issues, reply, and resolve threads |
+| `MERGE_PR` | Merge approved PRs and run post-merge checks |
+| `RETROSPECTIVE` | Generate the epic retrospective artifact after merge |
+| `DONE` | All epics processed |
+| `BLOCKED` | Manual intervention required |
 
-### Auto-Approve Workflow
+### QA Automation Contract
 
-The `auto-approve.yml` GitHub workflow handles PR approval automatically:
+The QA phase is intentionally strict:
 
-**Approval conditions (ALL must be met):**
-1. At least 10 minutes since last push
-2. Copilot review exists
-3. All review threads resolved
-4. All CI checks passed
-
-**Features:**
-- Dismisses stale approvals if unresolved threads exist
-- Autopilot continues to next epic immediately after PR creation
-- Pending PRs are monitored and auto-merged when approved
-
-### FIX_ISSUES Phase
-
-When Copilot has review comments:
-1. Fetches unresolved thread content (file, line, comment) via GraphQL
-2. Claude fixes the issues
-3. Posts reply to PR acknowledging feedback
-4. Resolves all threads via GraphQL mutation
-5. Pushes fixes → Copilot re-reviews → auto-approve triggers
+- Read `.codex/skills/integration-tests-workflow/SKILL.md` first.
+- Read `specs/integration-tests.md` before adding anything.
+- Use only `./scripts/run_integration_tests.sh` to execute integration tests.
+- Keep tests at HTTP/system boundaries.
+- Do not mock or patch project internals.
+- Update `specs/integration-tests.md` if the catalog changes.
 
 ## Configuration
 
-### Configuration File
-
-Copy `config.example` to `.autopilot/config` and customize:
+Copy `config.example` to `.autopilot/config` and edit as needed:
 
 ```bash
 cp .autopilot/config.example .autopilot/config
 ```
 
-Settings can be configured via (in order of priority):
-1. Command line flags (`--debug`)
-2. Environment variables (`AUTOPILOT_DEBUG=1`)
-3. Config file (`.autopilot/config`)
+Settings can be provided in this order:
+
+1. Command line flags
+2. Environment variables
+3. `.autopilot/config`
+4. Built-in defaults
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUTOPILOT_DEBUG` | `0` | Enable debug logging to `.autopilot/tmp/debug.log` |
-| `MAX_TURNS` | `80` | Max Claude turns per phase |
+| `AUTOPILOT_VERBOSE` | `0` | Show more progress details in the console |
+| `MAX_TURNS` | `80` | Legacy prompt budget kept for compatibility |
 | `CHECK_INTERVAL` | `30` | Seconds between CI/Copilot checks |
 | `MAX_CHECK_WAIT` | `60` | Max iterations waiting for CI checks |
 | `MAX_COPILOT_WAIT` | `60` | Max iterations waiting for Copilot review |
 | `AUTOPILOT_RUN_MOBILE_NATIVE` | `0` | Set to `1` to run Gradle builds |
-| `AUTOPILOT_BASE_BRANCH` | auto | Override base branch (auto-detects main/master) |
+| `AUTOPILOT_BASE_BRANCH` | auto | Override base branch detection |
 
-### Execution Mode
+### Parallel Mode
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PARALLEL_MODE` | `0` | `0` = sequential, `1+` = use git worktrees |
 | `PARALLEL_CHECK_INTERVAL` | `60` | Seconds between pending PR checks |
-| `MAX_PENDING_PRS` | `2` | Max concurrent PRs in pending list |
-
-**All modes auto-continue:** After creating a PR, the autopilot immediately continues to the next epic. PR reviews run in background and are auto-merged when approved.
-
-- `PARALLEL_MODE=0`: One branch at a time on main worktree (simple)
-- `PARALLEL_MODE=1+`: Uses git worktrees for parallel branch management (useful when fixing multiple PRs)
-
-### Epic Source Files
-
-The autopilot reads epics from `_bmad-output/` directory:
-
-- `epics.md`
-- `@epics.md`
-- `epics-002.md`, `epics-*.md`, etc.
-
-Epic IDs are extracted from lines like:
-```markdown
-#### Epic 7A: User Authentication
-#### Epic 10A-SSO: Cross-Platform SSO
-```
+| `MAX_PENDING_PRS` | `2` | Max concurrent PRs before the orchestrator pauses new epic work |
 
 ## Project Structure
 
 ```
 .autopilot/
-├── bmad-autopilot.sh    # Main orchestrator script
-├── state.json           # Current state (auto-managed)
-├── autopilot.log        # Full execution log
+├── bmad-autopilot.sh    # Shell launcher
+├── bmad-autopilot.py    # Python orchestration core
+├── state.json           # Current state
+├── autopilot.log        # Execution log
 └── tmp/                 # Temporary files
-    ├── copilot.txt
-    ├── copilot_latest.json
-    └── claude-output.txt
+    ├── develop-stories-output.txt
+    ├── qa-automation-output.txt
+    ├── code-review-output.txt
+    ├── fix-issues-output.txt
+    └── retrospective-output.txt
 ```
 
-## Customization
+## BMAD Workflows Used
 
-### Local Checks
-
-The `autopilot_checks()` function in the script auto-detects your project type:
-
-- **Rust** (`backend/Cargo.toml`): `cargo fmt`, `cargo clippy`, `cargo test`
-- **TypeScript/pnpm** (`frontend/package.json`): `pnpm run check`, `pnpm run test`
-- **Gradle** (`mobile-native/gradlew`): Optional, set `AUTOPILOT_RUN_MOBILE_NATIVE=1`
-
-Modify this function to add your own checks.
-
-### BMAD Workflows
-
-The script calls these BMAD workflows:
-- `/bmad:bmm:workflows:dev-story` - Story development
-- `/bmad:bmm:workflows:code-review` - Code review
-
-Ensure these are available in your `.claude/commands/bmad/` or `.cursor/rules/bmad/`.
+- `$bmad-dev-story` - Story development
+- `$integration-tests-workflow` - QA automation tests
+- `$bmad-code-review` - Code review
+- `$bmad-retrospective` - Epic retrospective
 
 ## Troubleshooting
 
@@ -257,38 +161,20 @@ tail -f .autopilot/autopilot.log
 ### Check State
 
 ```bash
-cat .autopilot/state.json | jq
+python3 -m json.tool .autopilot/state.json
 ```
 
-### Reset State
+### Common Issues
 
-```bash
-rm .autopilot/state.json
-```
+- `codex` not found: install the Codex CLI and ensure it is on `PATH`
+- `gh` not found: install GitHub CLI and authenticate with `gh auth login`
+- Git tree dirty: commit or stash before starting the runner
+- PRs not merging: check `.autopilot/tmp/` for the latest `code-review-output.txt`, `fix-issues-output.txt`, or `retrospective-output.txt`
 
-### Debug Mode
+## Notes
 
-```bash
-# Via command line flag
-./.autopilot/bmad-autopilot.sh --debug
+- The shell wrapper exists only to keep the entrypoint simple.
+- The Python runner is the source of truth.
+- BMAD command templates remain optional compatibility files for command-based users.
 
-# Via environment variable
-AUTOPILOT_DEBUG=1 ./.autopilot/bmad-autopilot.sh
-
-# View debug log
-tail -f .autopilot/tmp/debug.log
-```
-
-Debug mode logs detailed information about Copilot detection, state transitions, and API calls.
-
-## License
-
-MIT License - see [LICENSE](LICENSE)
-
-## Contributing
-
-Contributions welcome! Please read the contributing guidelines first.
-
-## Credits
-
-Built for use with [BMAD Method](https://github.com/bmad-method) and Claude Code.
+Built for use with [BMAD Method](https://github.com/bmad-method) and Codex CLI.

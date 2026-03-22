@@ -6,72 +6,79 @@ user-invocable: true
 
 # BMAD Autopilot - Autonomous Development Flow
 
-**CRITICAL: Do NOT run .autopilot/bmad-autopilot.sh - execute the phases directly yourself!**
+**CRITICAL: Do NOT run `.autopilot/bmad-autopilot.sh` from inside this command. Execute the phase logic directly.**
 
-You are an autonomous development orchestrator. Process epics through the full development cycle.
+You are an autonomous development orchestrator.
 
-**Epic pattern:** $ARGUMENTS (if empty, find next epic from `_bmad-output/epics*.md`)
+**Epic pattern:** $ARGUMENTS (if empty, find the next active epic from `_bmad-output/implementation-artifacts/sprint-status.yaml`)
 
 ## Step 1: Load State
 
-Read `.autopilot/state.json` to get current phase and epic. If file doesn't exist, start fresh with phase `FIND_EPIC`.
+Read `.autopilot/state.json`. If it does not exist, start fresh with `CHECK_PENDING_PR`.
 
-## Step 2: Execute Current Phase
+## Step 2: Execute the Current Phase
 
-### FIND_EPIC
-1. Search `_bmad-output/epics*.md` for headers matching `^#{2,4} Epic [0-9]`
-2. Extract epic IDs, filter out ones containing "Complete/Summary/Overview/Done"
-3. Skip epics already in `completed_epics` list
-4. If `$ARGUMENTS` provided, filter by that pattern
-5. Set `current_epic` to first match, update state to `CREATE_BRANCH`
+### CHECK_PENDING_PR / FIND_EPIC
+1. Resume open `feature/epic-*` PRs before starting new work.
+2. Read `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+3. Skip completed epics, backlog epics, and epics already in the pending PR queue.
+4. Apply `$ARGUMENTS` filtering if provided.
+5. Select the next active epic and move to `CREATE_BRANCH`.
 
 ### CREATE_BRANCH
-1. Run: `git fetch origin && git checkout main && git pull origin main`
-2. Run: `git checkout -b feature/epic-{ID}` (or checkout existing)
-3. Run: `git push -u origin feature/epic-{ID}`
-4. Update state to `DEVELOP_STORIES`
+1. Checkout the base branch and create `feature/epic-{ID}`.
+2. Push the branch.
+3. Move to `DEVELOP_STORIES`.
 
 ### DEVELOP_STORIES
-1. Find epic file: search `_bmad-output/epics*.md` for `^#{2,4} Epic {ID}:`
-2. Read the epic file to get story details
-3. For each story in the epic:
-   - Create story file if needed
-   - Implement the story completely
-   - Write tests
-   - Commit: `git add -A && git commit -m "feat({ID}): {story description}"`
-4. Update state to `CODE_REVIEW`
+1. Read the epic's story files from the sprint-status `story_location` directory.
+2. Invoke `$bmad-dev-story`.
+3. Let the skill implement each story and commit incrementally.
+4. Move to `QA_AUTOMATION_TEST`.
+
+### QA_AUTOMATION_TEST
+1. Invoke `$integration-tests-workflow`.
+2. Read `specs/integration-tests.md` before adding anything.
+3. Let the skill add or update automated tests using the repository's existing test framework.
+4. The skill must run tests with `./scripts/run_integration_tests.sh`.
+5. Fix failures until the tests pass.
+6. Move to `CODE_REVIEW`.
 
 ### CODE_REVIEW
-1. Review all changes: `git diff main...HEAD`
-2. Fix any issues (lint, types, tests)
-3. Run checks and fix failures
-4. Commit fixes: `git add -A && git commit -m "fix({ID}): code review fixes"`
-5. Push: `git push`
-6. Update state to `CREATE_PR`
+1. Invoke `$bmad-code-review`.
+2. Fix any issues found.
+3. Run local checks.
+4. Push the fixes.
+5. Move to `CREATE_PR`.
 
 ### CREATE_PR
-1. Create PR: `gh pr create --title "feat(epic-{ID}): {title}" --body "..."`
-2. Add epic to `completed_epics` in state
-3. Update state to `FIND_EPIC` (continue to next epic)
+1. Create the PR.
+2. Add it to the pending list.
+3. Move back to `FIND_EPIC` and continue to the next epic.
+
+### WAIT_COPILOT / FIX_ISSUES
+1. Wait for Copilot review activity.
+2. If Copilot requests changes or leaves unresolved threads, fix them.
+3. Reply to the review.
+4. Resolve threads.
+5. Return to waiting.
+
+### MERGE_PR / RETROSPECTIVE
+1. Merge approved PRs.
+2. Sync the base branch.
+3. Invoke `$bmad-retrospective` to generate the retrospective artifact.
+4. Mark the epic complete.
 
 ### DONE
-All epics processed. Show summary of completed work.
-
-## Step 3: Update State
-
-After each phase, write `.autopilot/state.json`:
-```json
-{"phase": "...", "current_epic": "...", "completed_epics": [...]}
-```
+All epics processed and the pending PR queue is empty.
 
 ## Rules
 
-1. **NEVER ask questions** - make autonomous decisions
-2. **Commit often** - atomic commits
-3. **Continue on errors** - log and try next epic
-4. **Update state** - after each phase
+1. Never ask the user questions during automation.
+2. Commit often.
+3. Continue on errors where possible and mark the epic blocked if you cannot proceed.
+4. Persist state after each phase transition.
 
 ## Start Now
 
-Read `.autopilot/state.json` and execute current phase for: $ARGUMENTS
-
+Read state and execute the current phase for: $ARGUMENTS
