@@ -12,16 +12,19 @@ The active runtime is the Codex-backed launcher in `scripts/bmad-autopilot.py`.
 
 ## Current workflow
 
-The active flow is:
+The active default flow is:
+
+`FIND_EPIC -> CREATE_STORY -> DEVELOP_STORIES -> QA_AUTOMATION_TEST -> CODE_REVIEW -> FIND_EPIC`
+
+When code review succeeds, the runner writes `done` to the story file and to `sprint-status.yaml`, then moves on to the next story.
+
+Set `AUTOPILOT_FLOW=legacy` only if you need the old epic/PR flow:
 
 `CHECK_PENDING_PR -> FIND_EPIC -> CREATE_BRANCH -> DEVELOP_STORIES -> QA_AUTOMATION_TEST -> CODE_REVIEW -> CREATE_PR`
-
-Pending PRs are monitored in the background until the queue is empty.
-After a merge, the runner generates a retrospective artifact and returns to pending-PR checks.
 
 ## Runtime notes
 
 - Codex exec handles implementation, QA automation, code review, fix-up, and retrospective synthesis.
-- `gh` handles PRs, review polling, and merges.
+- `gh` is only required for the legacy flow.
 - `install.sh` is the supported bootstrap path.
 - See `README.md` for the user-facing workflow and `docs/ARCHITECTURE.md` for the detailed state machine.

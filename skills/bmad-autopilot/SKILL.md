@@ -1,6 +1,6 @@
 ---
 name: bmad-autopilot-skill
-description: Autonomous development orchestrator for sprint queue processing. Use when the user wants to run the autopilot, process active epics automatically, or automate the BMAD development workflow.
+description: Autonomous development orchestrator for sprint queue processing. Use when the user wants to run the autopilot, process active stories automatically, or automate the BMAD development workflow.
 allowed-tools: Bash, Read
 ---
 
@@ -12,14 +12,23 @@ This skill runs the launcher in `./.autopilot/bmad-autopilot.sh`, which delegate
 
 Activate this skill when the user:
 
-- Wants to process active epics automatically
-- Wants to automate PR creation and review cycles
+- Wants to process active stories automatically
+- Wants to automate story creation, implementation, review, and status promotion
 - Mentions the BMAD development workflow
 - Wants Codex-driven implementation, QA automation, review, and retrospective generation
 
 ## Workflow States
 
-The orchestrator runs through these phases:
+The orchestrator defaults to the story-first flow:
+
+1. `FIND_EPIC`
+2. `CREATE_STORY`
+3. `DEVELOP_STORIES`
+4. `QA_AUTOMATION_TEST`
+5. `CODE_REVIEW`
+6. Loop until every story is `done`
+
+Legacy epic/PR flow remains available when `AUTOPILOT_FLOW=legacy`:
 
 1. `CHECK_PENDING_PR`
 2. `FIND_EPIC`
@@ -37,20 +46,12 @@ The orchestrator runs through these phases:
 
 ## What the Runner Uses Codex For
 
+- Story creation
 - Story implementation
 - Automated test generation
 - Code review and fix-up
-- Copilot issue repair
+- Copilot issue repair in legacy flow
 - Retrospective synthesis
-
-## Auto-Approve Integration
-
-The `auto-approve.yml` workflow still gates PR approval on:
-
-1. Copilot review exists
-2. All review threads are resolved
-3. All CI checks pass
-4. Enough time has elapsed since the last push
 
 ## Logs and State
 
@@ -60,4 +61,6 @@ The `auto-approve.yml` workflow still gates PR approval on:
 
 ## Prerequisites
 
-The launcher requires: `python3`, `codex`, `gh`, `git`
+Story flow requires: `python3`, `codex`, `git`
+
+Legacy flow also requires: `gh`

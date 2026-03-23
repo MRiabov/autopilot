@@ -8,8 +8,9 @@
 |----------|---------|-------------|
 | `AUTOPILOT_DEBUG` | `0` | Enable debug logging to `.autopilot/tmp/debug.log` |
 | `AUTOPILOT_VERBOSE` | `0` | Show more progress details in the console |
+| `AUTOPILOT_FLOW` | `auto` | `auto` selects story flow when sprint status has story rows; `story` forces story flow; `legacy` keeps the old epic/PR flow |
 | `MAX_TURNS` | `80` | Legacy prompt budget kept for compatibility |
-| `CHECK_INTERVAL` | `30` | Seconds between CI/Copilot checks |
+| `CHECK_INTERVAL` | `30` | Seconds between QA or Copilot checks |
 | `MAX_CHECK_WAIT` | `60` | Maximum iterations waiting for CI checks |
 | `MAX_COPILOT_WAIT` | `60` | Maximum iterations waiting for Copilot review |
 | `AUTOPILOT_RUN_MOBILE_NATIVE` | `0` | Set to `1` to run Gradle builds |
@@ -19,16 +20,17 @@
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PARALLEL_MODE` | `0` | Enable worktree-based parallel epic handling |
+| `PARALLEL_MODE` | `0` | Enable worktree-based parallel epic handling in the legacy flow |
 | `PARALLEL_CHECK_INTERVAL` | `60` | Seconds between pending PR checks |
 | `MAX_PENDING_PRS` | `2` | Maximum concurrent PRs waiting for review |
 
 ### Example
 
 ```bash
-MAX_TURNS=100 CHECK_INTERVAL=60 ./.autopilot/bmad-autopilot.sh
-./.autopilot/bmad-autopilot.sh --debug
-PARALLEL_MODE=1 ./.autopilot/bmad-autopilot.sh
+AUTOPILOT_FLOW=story ./.autopilot/bmad-autopilot.sh
+AUTOPILOT_FLOW=legacy ./.autopilot/bmad-autopilot.sh --debug
+PARALLEL_MODE=1 AUTOPILOT_FLOW=legacy ./.autopilot/bmad-autopilot.sh
+./.autopilot/bmad-autopilot.sh --from 3-1
 ```
 
 ## Configuration File
@@ -55,7 +57,7 @@ The config parser uses a whitelist. Unknown keys are ignored and logged.
 Allowed keys:
 
 ```text
-AUTOPILOT_DEBUG, AUTOPILOT_VERBOSE, MAX_TURNS, CHECK_INTERVAL,
+AUTOPILOT_DEBUG, AUTOPILOT_VERBOSE, AUTOPILOT_FLOW, MAX_TURNS, CHECK_INTERVAL,
 MAX_CHECK_WAIT, MAX_COPILOT_WAIT, AUTOPILOT_RUN_MOBILE_NATIVE,
 PARALLEL_MODE, PARALLEL_CHECK_INTERVAL, MAX_PENDING_PRS,
 AUTOPILOT_BASE_BRANCH
@@ -78,11 +80,19 @@ AUTOPILOT_BASE_BRANCH=develop ./.autopilot/bmad-autopilot.sh
 
 ## Sprint Status Queue
 
-The runner reads the sprint queue from:
+The runner reads `_bmad-output/implementation-artifacts/sprint-status.yaml` and follows story rows in file order. In story flow it prioritizes `in-progress`, then `review`, then `ready-for-dev`, then `backlog`.
 
-- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+## Start-From Selector
 
-Active epic IDs come from `development_status` entries such as `epic-1`, `epic-2`, etc. The corresponding story files are read from the `story_location` directory declared in the same YAML file.
+Use `--from` to skip ahead to a later story or epic when starting a fresh run:
+
+```bash
+./.autopilot/bmad-autopilot.sh --from 3-1
+./.autopilot/bmad-autopilot.sh --from 3.1
+./.autopilot/bmad-autopilot.sh --from 3
+```
+
+The selector is applied before the normal story-priority ordering, so earlier stories are ignored. In story flow the value can be a story key like `3-1`, a dot-form alias like `3.1`, or an epic number like `3`.
 
 ## Local Checks Configuration
 
@@ -96,12 +106,13 @@ The Python runner auto-detects common project types:
 
 The runner sends Codex prompts for these workflows:
 
+- `create-story`
 - `dev-story`
 - `qa-automate`
 - `code-review`
 - `retrospective`
 
-The prompts live inside `bmad-autopilot.py` and `scripts/bmad-autopilot.py`. Edit them there if you need to change the automated behavior.
+The prompts live inside `scripts/bmad-autopilot.py`. Edit them there if you need to change the automated behavior.
 
 ## Logging
 
@@ -114,14 +125,16 @@ The prompts live inside `bmad-autopilot.py` and `scripts/bmad-autopilot.py`. Edi
 The state file is `.autopilot/state.json`. It stores:
 
 - current phase
-- current epic
+- current story or epic
 - completed epics
-- pending PR queue
+- pending PR queue for the legacy flow
 - paused context for fix-up work
 
 You can reset the runner by deleting `.autopilot/state.json`.
 
 ## GitHub Integration
+
+`gh` is only required for the legacy flow.
 
 Branch naming:
 

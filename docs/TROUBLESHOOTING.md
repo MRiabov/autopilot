@@ -10,14 +10,17 @@ Typical requirements:
 
 - `python3`
 - `codex`
-- `gh`
 - `git`
+
+Legacy flow only:
+
+- `gh`
 
 ### 2. Git working tree not clean
 
-The runner warns before it starts if the repo has uncommitted changes.
+Story flow continues unattended even if the tree is dirty, but you should still review the state before launching.
 
-Fix:
+If you want a clean start:
 
 ```bash
 git add -A && git commit -m "wip"
@@ -25,96 +28,70 @@ git add -A && git commit -m "wip"
 git stash
 ```
 
-### 3. Autopilot gets stuck waiting for Copilot
+### 3. Story is already in `review` but nothing happens
 
-Symptoms:
-
-- The log shows repeated `waiting for Copilot` messages.
-- No Copilot review appears on the PR.
-
-Check what reviews and comments exist:
-
-```bash
-gh pr view --json comments,reviews
-```
-
-Possible causes:
-
-1. Copilot is not enabled for the repository.
-2. The PR review author login does not contain `copilot`.
-
-### 4. Copilot reviewed but the runner does not see it
-
-Inspect the latest Copilot payload:
-
-```bash
-cat .autopilot/tmp/copilot_latest.json
-```
-
-If the author login or review state differs from the repository's current Copilot behavior, update the review-detection logic in the Python runner.
-
-### 5. No active epics too early
-
-Symptoms:
-
-- The runner exits with `No more active epics in sprint-status.yaml and no pending PRs - ALL DONE`
-- Active epics still exist in `_bmad-output/implementation-artifacts/sprint-status.yaml`
-
-Check sprint queue parsing:
+Check the current story row in sprint status and the matching story file:
 
 ```bash
 python3 - <<'PY'
 from pathlib import Path
 import yaml
 data = yaml.safe_load(Path('_bmad-output/implementation-artifacts/sprint-status.yaml').read_text())
-print([key for key, value in data['development_status'].items() if key.startswith('epic-') and value not in {'backlog', 'done'}])
+print({k: v for k, v in data['development_status'].items() if v in {'in-progress', 'review', 'ready-for-dev', 'backlog'}})
 PY
 ```
 
-If the state file is stale, reset it:
+If the story is still `review`, the next phase should be `code-review`. If the runner is stuck in an old legacy state, delete `.autopilot/state.json` and rerun the launcher.
+
+### 4. Legacy state file blocks story flow
+
+Symptoms:
+
+- The old `BLOCKED` or PR-centric state remains in `.autopilot/state.json`
+- Story flow starts but immediately fails to dispatch
+
+Fix:
 
 ```bash
 rm .autopilot/state.json
 ./.autopilot/bmad-autopilot.sh
 ```
 
-### 6. State corruption
+The story flow will also reset stale legacy state automatically on a fresh launch.
 
-If `.autopilot/state.json` becomes invalid or the phase machine looks wrong:
+### 5. No active stories too early
 
-```bash
-rm .autopilot/state.json
-./.autopilot/bmad-autopilot.sh
-```
-
-### 7. Multiple open PRs accumulated
-
-The runner is designed to resume open `feature/epic-*` PRs before starting new epics. If you interrupt it repeatedly, re-run the launcher and it should pick up the first open PR automatically.
-
-### 8. CI checks never pass
-
-Check the latest CI and review output:
+If the runner exits with `No more active stories in sprint-status.yaml`, check the sprint status file:
 
 ```bash
-gh pr checks
-cat .autopilot/tmp/failed-checks.json
+python3 - <<'PY'
+from pathlib import Path
+import yaml
+data = yaml.safe_load(Path('_bmad-output/implementation-artifacts/sprint-status.yaml').read_text())
+print([key for key, value in data['development_status'].items() if key and not key.startswith('epic-') and not key.endswith('-retrospective') and value != 'done'])
+PY
 ```
 
-If the runner has already merged a PR but the repo looks stale locally, re-run the launcher so it can sync the base branch.
+If all stories are done, that exit is correct.
 
-### 9. Codex stops before finishing a phase
+### 6. Story status updated, but sprint status did not change
 
-If a Codex phase finishes without the expected status marker, inspect the matching output file:
+Inspect the live story file and sprint file. Story flow updates both files on review success. If only the story file changed, the runner likely hit a file-write error while updating `_bmad-output/implementation-artifacts/sprint-status.yaml`.
 
-- `develop-stories-output.txt`
-- `qa-automation-output.txt`
+### 7. Codex stops before finishing a phase
+
+If a Codex phase finishes without the expected output, inspect the matching file:
+
+- `create-story-output.txt`
+- `develop-story-output.txt`
+- `qa-story-output.txt`
 - `code-review-output.txt`
 - `fix-issues-output.txt`
 - `retrospective-output.txt`
 
 Then rerun the launcher with `--continue`.
 
-### 10. Permission denied on script
+### 8. Permission denied on script
 
 ```bash
 chmod +x ./.autopilot/bmad-autopilot.sh
@@ -132,7 +109,7 @@ tail -f .autopilot/autopilot.log
 ### Manual state transitions
 
 ```bash
-echo '{"mode":"sequential","phase":"CREATE_PR","current_epic":"1","completed_epics":[],"pending_prs":[],"paused_context":null,"active_phase":null,"active_epic":null,"active_worktree":null}' > .autopilot/state.json
+echo '{"mode":"sequential","phase":"FIND_EPIC","current_epic":null,"current_story":null,"current_story_file":null,"completed_epics":[],"pending_prs":[],"paused_context":null,"active_phase":null,"active_epic":null,"active_worktree":null}' > .autopilot/state.json
 ./.autopilot/bmad-autopilot.sh --continue
 ```
 

@@ -9,6 +9,8 @@ Python file.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import math
 import json
 import os
 import re
@@ -16,6 +18,8 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
+import wave
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -31,6 +35,7 @@ class Phase(str, Enum):
     CHECK_PENDING_PR = "CHECK_PENDING_PR"
     FIND_EPIC = "FIND_EPIC"
     CREATE_BRANCH = "CREATE_BRANCH"
+    CREATE_STORY = "CREATE_STORY"
     DEVELOP_STORIES = "DEVELOP_STORIES"
     COMMIT_SPLIT = "COMMIT_SPLIT"
     QA_AUTOMATION_TEST = "QA_AUTOMATION_TEST"
@@ -71,6 +76,13 @@ class PausedContext:
     phase: str
 
 
+@dataclass(frozen=True)
+class StoryTarget:
+    key: str
+    path: Path
+    status: SprintStatusValue
+
+
 class SprintStatusValue(str, Enum):
     BACKLOG = "backlog"
     IN_PROGRESS = "in-progress"
@@ -91,6 +103,13 @@ class SprintStatus(BaseModel):
     tracking_system: str
     story_location: Path
     development_status: dict[str, SprintStatusValue]
+
+    def story_entries(self) -> list[tuple[str, SprintStatusValue]]:
+        return [
+            (key, status)
+            for key, status in self.development_status.items()
+            if re.fullmatch(r"\d+-\d+-.*", key)
+        ]
 
     def normalized_story_root(self, project_root: Path) -> Path:
         root = self.story_location if self.story_location.is_absolute() else project_root / self.story_location
@@ -161,6 +180,8 @@ class AutopilotState:
     mode: str = "sequential"
     phase: Phase = Phase.FIND_EPIC
     current_epic: Optional[str] = None
+    current_story: Optional[str] = None
+    current_story_file: Optional[str] = None
     completed_epics: list[str] = field(default_factory=list)
     pending_prs: list[PendingPR] = field(default_factory=list)
     paused_context: Optional[PausedContext] = None
@@ -209,6 +230,8 @@ class AutopilotState:
             mode=mode,
             phase=phase,
             current_epic=data.get("current_epic"),
+            current_story=data.get("current_story"),
+            current_story_file=data.get("current_story_file"),
             completed_epics=completed,
             pending_prs=pending_prs,
             paused_context=paused_context,
@@ -222,6 +245,8 @@ class AutopilotState:
             "mode": self.mode,
             "phase": self.phase.value,
             "current_epic": self.current_epic,
+            "current_story": self.current_story,
+            "current_story_file": self.current_story_file,
             "completed_epics": list(self.completed_epics),
             "pending_prs": [pr.to_dict() for pr in self.pending_prs],
             "paused_context": self.paused_context.to_dict() if self.paused_context else None,
@@ -250,6 +275,8 @@ class AutopilotState:
 @dataclass
 class RuntimeConfig:
     epic_pattern: str = ""
+    start_from: str = ""
+    flow_mode: str = "auto"
     continue_run: bool = False
     debug_mode: bool = False
     verbose_mode: bool = False
@@ -299,13 +326,24 @@ def write_text(path: Path, text: str) -> None:
 
 
 class AutopilotRunner:
-    codex_model = "gpt-5.4-mini"
-    codex_reasoning_effort = "xhigh"
+    codex_reasoning_effort = "high"
     commit_split_reasoning_effort = "low"
+    sound_profiles: dict[str, list[tuple[float, float]]] = {
+        "quota": [(880.0, 0.14), (660.0, 0.14), (440.0, 0.26)],
+        "review_ready": [(659.25, 0.12), (783.99, 0.12), (1046.50, 0.20)],
+        "review_complete": [(523.25, 0.10), (659.25, 0.10), (783.99, 0.10), (1046.50, 0.14), (1318.51, 0.26)],
+    }
+    worktree_mirror_paths: tuple[Path, ...] = (
+        Path(".venv"),
+        Path("frontend/node_modules"),
+        Path("website/node_modules"),
+    )
+    sound_player_candidates = ("paplay", "aplay", "afplay", "ffplay", "play")
 
     allowed_config_keys = {
         "AUTOPILOT_DEBUG",
         "AUTOPILOT_VERBOSE",
+        "AUTOPILOT_FLOW",
         "MAX_TURNS",
         "CHECK_INTERVAL",
         "MAX_CHECK_WAIT",
@@ -319,14 +357,14 @@ class AutopilotRunner:
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.project_root = self.detect_project_root()
+        self.project_root = self.detect_project_root().resolve()
         self.autopilot_dir = self.project_root / ".autopilot"
         self.config_file = self.autopilot_dir / "config"
         self.state_file = self.autopilot_dir / "state.json"
         self.log_file = self.autopilot_dir / "autopilot.log"
         self.tmp_dir = self.autopilot_dir / "tmp"
         self.debug_log = self.tmp_dir / "debug.log"
-        self.worktree_dir = self.autopilot_dir / "worktrees"
+        self.worktree_dir = self.default_worktree_dir()
         self.sprint_status_file = self.project_root / "_bmad-output" / "implementation-artifacts" / "sprint-status.yaml"
 
         self.autopilot_dir.mkdir(parents=True, exist_ok=True)
@@ -334,6 +372,7 @@ class AutopilotRunner:
         self.worktree_dir.mkdir(parents=True, exist_ok=True)
 
         self.config = self.load_runtime_config()
+        self.flow_mode = self.resolve_flow_mode()
         self.base_branch = self.config.base_branch or self.detect_base_branch()
         if not self.config.base_branch:
             self.config.base_branch = self.base_branch
@@ -347,6 +386,7 @@ class AutopilotRunner:
                 f"Config file: {self.config_file} (exists: {self.config_file.exists()})\n"
                 f"Settings: MAX_TURNS={self.config.max_turns} CHECK_INTERVAL={self.config.check_interval} "
                 f"MAX_CHECK_WAIT={self.config.max_check_wait}\n"
+                f"Flow mode: {self.flow_mode}\n"
                 f"Parallel mode: PARALLEL_MODE={self.config.parallel_mode} MAX_PENDING_PRS={self.config.max_pending_prs}\n",
             )
 
@@ -365,6 +405,59 @@ class AutopilotRunner:
             return Path(result.stdout.strip())
         except subprocess.CalledProcessError:
             return Path.cwd()
+
+    def default_worktree_dir(self) -> Path:
+        repo_digest = hashlib.sha1(str(self.project_root).encode("utf-8")).hexdigest()[:10]
+        return Path(tempfile.gettempdir()) / "bmad-autopilot" / f"{self.project_root.name}-{repo_digest}"
+
+    def sprint_status_path(self, root: Path | None = None) -> Path:
+        base_root = root or self.project_root
+        return base_root / "_bmad-output" / "implementation-artifacts" / "sprint-status.yaml"
+
+    def epic_workspace_root(self, epic_id: str | None = None) -> Path:
+        if epic_id:
+            pending = self.state_get_pending_pr(epic_id)
+            if pending and pending.worktree:
+                pending_root = Path(pending.worktree)
+                if pending_root.exists():
+                    return pending_root
+            wt_path = self.worktree_path(epic_id)
+            if wt_path.exists():
+                return wt_path
+
+        if self.state.active_worktree:
+            active_root = Path(self.state.active_worktree)
+            if active_root.exists():
+                return active_root
+
+        return self.project_root
+
+    def mirror_worktree_support_dirs(self, wt_path: Path) -> None:
+        for rel_path in self.worktree_mirror_paths:
+            source = self.project_root / rel_path
+            if not source.exists():
+                continue
+
+            destination = wt_path / rel_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+
+            if destination.exists() or destination.is_symlink():
+                if destination.is_symlink() or destination.is_file():
+                    destination.unlink()
+                else:
+                    shutil.rmtree(destination)
+
+            try:
+                os.symlink(source, destination, target_is_directory=source.is_dir())
+            except OSError:
+                if source.is_dir():
+                    shutil.copytree(source, destination, symlinks=True, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(source, destination)
+
+    def set_active_worktree(self, worktree: Path | None) -> None:
+        self.state.active_worktree = str(worktree) if worktree else None
+        self.save_state()
 
     def detect_base_branch(self) -> str:
         try:
@@ -423,6 +516,8 @@ class AutopilotRunner:
 
         return RuntimeConfig(
             epic_pattern=self.args.epic_pattern or "",
+            start_from=self.args.start_from or "",
+            flow_mode=env_or_file("AUTOPILOT_FLOW", "auto").strip().lower() or "auto",
             continue_run=bool(self.args.continue_run),
             debug_mode=debug_mode,
             verbose_mode=verbose_mode,
@@ -436,6 +531,18 @@ class AutopilotRunner:
             max_pending_prs=self.to_int(env_or_file("MAX_PENDING_PRS", "2"), 2),
             base_branch=base_branch,
         )
+
+    def resolve_flow_mode(self) -> str:
+        flow = (self.config.flow_mode or "auto").strip().lower()
+        if flow in {"story", "legacy"}:
+            return flow
+        if not self.sprint_status_file.exists():
+            return "legacy"
+        sprint_status = self.load_sprint_status()
+        return "story" if sprint_status.story_entries() else "legacy"
+
+    def is_story_flow(self) -> bool:
+        return self.flow_mode == "story"
 
     @staticmethod
     def to_bool(value: str) -> bool:
@@ -453,7 +560,10 @@ class AutopilotRunner:
             raise RuntimeError(f"❌ Required command not found: {cmd}")
 
     def require_tooling(self) -> None:
-        for cmd in ("git", "gh", "codex", "python3"):
+        required = ["git", "codex", "python3"]
+        if not self.is_story_flow():
+            required.append("gh")
+        for cmd in required:
             self.require_cmd(cmd)
 
     def log(self, message: str) -> None:
@@ -584,23 +694,105 @@ class AutopilotRunner:
             returncode = proc.wait()
         return returncode
 
+    def _sound_path(self, sound_name: str) -> Path:
+        return self.tmp_dir / "sounds" / f"{sound_name}.wav"
+
+    def _synthesize_sound(self, sound_name: str) -> Path:
+        notes = self.sound_profiles[sound_name]
+        output_path = self._sound_path(sound_name)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        sample_rate = 44100
+        amplitude = 0.95
+        gap_seconds = 0.04
+        attack_seconds = 0.008
+        release_seconds = 0.012
+
+        frames = bytearray()
+        for frequency, duration in notes:
+            note_samples = max(1, int(sample_rate * duration))
+            attack_samples = max(1, min(note_samples // 4, int(sample_rate * attack_seconds)))
+            release_samples = max(1, min(note_samples // 4, int(sample_rate * release_seconds)))
+
+            for sample_index in range(note_samples):
+                if sample_index < attack_samples:
+                    envelope = sample_index / attack_samples
+                elif sample_index >= note_samples - release_samples:
+                    envelope = max(0.0, (note_samples - sample_index) / release_samples)
+                else:
+                    envelope = 1.0
+
+                sample = int(
+                    32767
+                    * amplitude
+                    * envelope
+                    * math.sin(2.0 * math.pi * frequency * (sample_index / sample_rate))
+                )
+                frames.extend(sample.to_bytes(2, byteorder="little", signed=True))
+
+            gap_samples = int(sample_rate * gap_seconds)
+            for _ in range(gap_samples):
+                frames.extend((0).to_bytes(2, byteorder="little", signed=True))
+
+        with wave.open(str(output_path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(bytes(frames))
+
+        return output_path
+
+    def _sound_player_command(self, sound_path: Path) -> list[str] | None:
+        if shutil.which("paplay"):
+            return ["paplay", str(sound_path)]
+        if shutil.which("aplay"):
+            return ["aplay", "-q", str(sound_path)]
+        if shutil.which("afplay"):
+            return ["afplay", str(sound_path)]
+        if shutil.which("ffplay"):
+            return ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", str(sound_path)]
+        if shutil.which("play"):
+            return ["play", "-q", str(sound_path)]
+        return None
+
+    def play_sound(self, sound_name: str) -> None:
+        if sound_name not in self.sound_profiles:
+            return
+        try:
+            sound_path = self._synthesize_sound(sound_name)
+            command = self._sound_player_command(sound_path)
+            if not command:
+                return
+            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            self.verbose(f"⚠️ Sound notification failed for {sound_name}: {exc}")
+
+    @staticmethod
+    def _looks_like_quota_exhaustion(output_text: str) -> bool:
+        text = output_text.lower()
+        patterns = (
+            r"\bquota\b",
+            r"out of credits",
+            r"insufficient credits?",
+            r"rate limit exceeded",
+            r"billing",
+        )
+        return any(re.search(pattern, text) for pattern in patterns)
+
     def run_codex_exec(
         self,
         prompt: str,
         output_file: Path | None = None,
         *,
         cwd: Path | None = None,
-        model: str | None = None,
         reasoning_effort: str | None = None,
     ) -> int:
-        selected_model = model or self.codex_model
         selected_reasoning_effort = reasoning_effort or self.codex_reasoning_effort
-        self.log(f"🤖 Codex exec ({selected_model}, reasoning={selected_reasoning_effort})")
+        effective_output_file = output_file or (self.tmp_dir / "codex-output.txt")
+        self.log(f"🤖 Codex exec (reasoning={selected_reasoning_effort})")
         command = [
             "codex",
             "exec",
-            "-c",
-            f"model={json.dumps(selected_model)}",
             "-c",
             f"model_reasoning_effort={json.dumps(selected_reasoning_effort)}",
             "--dangerously-bypass-approvals-and-sandbox",
@@ -608,7 +800,12 @@ class AutopilotRunner:
             str(cwd or self.project_root),
             "-",
         ]
-        return self.run_streaming_command(command, cwd=cwd or self.project_root, input_text=prompt, output_file=output_file)
+        returncode = self.run_streaming_command(command, cwd=cwd or self.project_root, input_text=prompt, output_file=effective_output_file)
+        if returncode != 0:
+            output_text = read_text(effective_output_file)
+            if self._looks_like_quota_exhaustion(output_text):
+                self.play_sound("quota")
+        return returncode
 
     # ------------------------------------------------------------------
     # State management
@@ -645,6 +842,26 @@ class AutopilotRunner:
         else:
             self.state.phase = phase_value
             self.state.current_epic = epic
+        self.state.current_story = None
+        self.state.current_story_file = None
+        self.save_state()
+
+    def state_current_story(self) -> Optional[str]:
+        return self.state.current_story
+
+    def state_set_story(self, phase: Phase | str, story_key: str, story_file: Path | None = None) -> None:
+        phase_value = Phase.from_value(phase)
+        epic_id = story_key.split("-", 1)[0] if story_key else None
+        if self.state.is_parallel:
+            self.state.active_phase = phase_value
+            self.state.active_epic = epic_id
+            self.state.phase = phase_value
+            self.state.current_epic = epic_id
+        else:
+            self.state.phase = phase_value
+            self.state.current_epic = epic_id
+        self.state.current_story = story_key
+        self.state.current_story_file = str(story_file) if story_file else None
         self.save_state()
 
     def state_mark_completed(self, epic: str) -> None:
@@ -719,16 +936,46 @@ class AutopilotRunner:
     def worktree_exists(self, epic_id: str) -> bool:
         return self.worktree_path(epic_id).exists()
 
-    def worktree_create(self, epic_id: str, branch_name: str) -> Path:
+    def worktree_create(
+        self,
+        epic_id: str,
+        branch_name: str,
+        *,
+        start_point: str | None = None,
+        prefer_existing_branch: bool = False,
+    ) -> Path:
         wt_path = self.worktree_path(epic_id)
         if wt_path.exists():
             self.debug(f"Worktree already exists: {wt_path}")
+            self.mirror_worktree_support_dirs(wt_path)
             return wt_path
 
         self.log(f"🌳 Creating worktree for {epic_id} at {wt_path}")
-        self.run_process(["git", "worktree", "add", str(wt_path), branch_name], cwd=self.project_root, check=False)
-        if not wt_path.exists():
-            self.run_process(["git", "worktree", "add", "-b", branch_name, str(wt_path), self.base_branch], cwd=self.project_root)
+        wt_path.parent.mkdir(parents=True, exist_ok=True)
+        self.run_process(["git", "fetch", "origin", self.base_branch], cwd=self.project_root, check=False)
+
+        add_result: subprocess.CompletedProcess[str]
+        if prefer_existing_branch:
+            add_result = self.run_process(["git", "worktree", "add", str(wt_path), branch_name], cwd=self.project_root, check=False)
+            if add_result.returncode != 0:
+                start_ref = start_point or f"origin/{branch_name}"
+                add_result = self.run_process(
+                    ["git", "worktree", "add", "-b", branch_name, str(wt_path), start_ref],
+                    cwd=self.project_root,
+                    check=False,
+                )
+        else:
+            start_ref = start_point or f"origin/{self.base_branch}"
+            add_result = self.run_process(
+                ["git", "worktree", "add", "-b", branch_name, str(wt_path), start_ref],
+                cwd=self.project_root,
+                check=False,
+            )
+
+        if add_result.returncode != 0 or not wt_path.exists():
+            raise RuntimeError(f"Failed to create worktree for {branch_name} at {wt_path}")
+
+        self.mirror_worktree_support_dirs(wt_path)
         return wt_path
 
     def worktree_remove(self, epic_id: str) -> None:
@@ -738,34 +985,36 @@ class AutopilotRunner:
             return
         self.log(f"🗑️ Removing worktree for {epic_id}")
         self.run_process(["git", "worktree", "remove", "--force", str(wt_path)], cwd=self.project_root, check=False)
+        if self.state.active_worktree and Path(self.state.active_worktree) == wt_path:
+            self.set_active_worktree(None)
 
     def worktree_prune(self) -> None:
         self.log("🧹 Pruning orphaned worktrees...")
         self.run_process(["git", "worktree", "prune"], cwd=self.project_root, check=False)
 
     def sync_base_branch(self) -> None:
-        self.run_process(["git", "checkout", self.base_branch], cwd=self.project_root, check=False)
-        self.run_process(["git", "pull", "origin", self.base_branch], cwd=self.project_root, check=False)
+        self.run_process(["git", "fetch", "origin", self.base_branch], cwd=self.project_root, check=False)
 
     # ------------------------------------------------------------------
     # Epic discovery
     # ------------------------------------------------------------------
 
-    def load_sprint_status(self) -> SprintStatus:
-        if not self.sprint_status_file.exists():
-            raise ValueError(f"Missing sprint status file: {self.sprint_status_file}")
+    def load_sprint_status(self, root: Path | None = None) -> SprintStatus:
+        sprint_status_file = self.sprint_status_path(root)
+        if not sprint_status_file.exists():
+            raise ValueError(f"Missing sprint status file: {sprint_status_file}")
 
-        raw = yaml.safe_load(read_text(self.sprint_status_file))
+        raw = yaml.safe_load(read_text(sprint_status_file))
         if not isinstance(raw, dict):
-            raise ValueError(f"Invalid sprint status YAML: {self.sprint_status_file}")
+            raise ValueError(f"Invalid sprint status YAML: {sprint_status_file}")
 
         try:
             sprint_status = SprintStatus.model_validate(raw)
         except ValidationError as exc:
-            raise ValueError(f"Invalid sprint status YAML: {self.sprint_status_file}") from exc
+            raise ValueError(f"Invalid sprint status YAML: {sprint_status_file}") from exc
 
-        expected_story_root = (self.project_root / "_bmad-output" / "implementation-artifacts").resolve()
-        actual_story_root = sprint_status.normalized_story_root(self.project_root)
+        expected_story_root = (root or self.project_root) / "_bmad-output" / "implementation-artifacts"
+        actual_story_root = sprint_status.normalized_story_root(root or self.project_root)
         if actual_story_root != expected_story_root:
             raise ValueError(
                 "Sprint status story_location does not match the repository implementation-artifacts directory: "
@@ -784,10 +1033,89 @@ class AutopilotRunner:
                 return True
         return False
 
+    def story_matches_patterns(self, story_key: str, sprint_status: SprintStatus) -> bool:
+        if not self.config.epic_pattern:
+            return True
+        epic_id = story_key.split("-", 1)[0]
+        haystack = " ".join([story_key, f"epic-{epic_id}", epic_id])
+        for pattern in self.config.epic_pattern.split():
+            if re.search(pattern, haystack, re.IGNORECASE):
+                return True
+        return False
+
+    def normalize_selection_reference(self, value: str) -> str:
+        return value.strip().replace(".", "-")
+
+    def selection_start_story_index(self, sprint_status: SprintStatus) -> int:
+        start_from = self.normalize_selection_reference(self.config.start_from)
+        if not start_from:
+            return 0
+
+        stories = sprint_status.story_entries()
+        story_index_by_key = {story_key: index for index, (story_key, _status) in enumerate(stories)}
+        if start_from in story_index_by_key:
+            return story_index_by_key[start_from]
+
+        prefix_match = re.fullmatch(r"(?:epic-)?(\d+)(?:-(\d+))?", start_from)
+        if prefix_match:
+            epic_id = prefix_match.group(1)
+            story_num = prefix_match.group(2)
+            story_prefix = f"{epic_id}-"
+            if story_num:
+                story_prefix = f"{epic_id}-{story_num}-"
+            for index, (story_key, _status) in enumerate(stories):
+                if story_key.startswith(story_prefix):
+                    return index
+
+        raise ValueError(f"Start-from reference not found in sprint status: {self.config.start_from}")
+
+    def selection_start_epic_index(self, sprint_status: SprintStatus) -> int:
+        start_from = self.normalize_selection_reference(self.config.start_from)
+        if not start_from:
+            return 0
+
+        epic_match = re.fullmatch(r"(?:epic-)?(\d+)(?:-\d+)?", start_from)
+        if not epic_match:
+            raise ValueError(f"Start-from reference is not an epic selector: {self.config.start_from}")
+
+        epic_id = epic_match.group(1)
+        active_epics = sprint_status.active_epic_ids()
+        for index, active_epic in enumerate(active_epics):
+            if active_epic == epic_id:
+                return index
+
+        raise ValueError(f"Start-from epic not found in active sprint epics: {self.config.start_from}")
+
+    def story_file_for_key(self, sprint_status: SprintStatus, story_key: str, root: Path | None = None) -> Path:
+        return sprint_status.normalized_story_root(root or self.project_root) / f"{story_key}.md"
+
+    def select_next_story(self, sprint_status: SprintStatus) -> StoryTarget | None:
+        priority_order = [
+            SprintStatusValue.IN_PROGRESS,
+            SprintStatusValue.REVIEW,
+            SprintStatusValue.READY_FOR_DEV,
+            SprintStatusValue.BACKLOG,
+        ]
+        stories = sprint_status.story_entries()
+        start_index = self.selection_start_story_index(sprint_status)
+        for status in priority_order:
+            for story_key, story_status in stories[start_index:]:
+                if story_status != status:
+                    continue
+                if not self.story_matches_patterns(story_key, sprint_status):
+                    continue
+                story_path = self.story_file_for_key(sprint_status, story_key)
+                if story_status != SprintStatusValue.BACKLOG and not story_path.exists():
+                    raise ValueError(f"Missing story file for story {story_key}: {story_path}")
+                return StoryTarget(key=story_key, path=story_path, status=story_status)
+        return None
+
     def find_next_epic(self, sprint_status: SprintStatus) -> Optional[str]:
         completed = set(self.state.completed_epics)
         pending = {pr.epic for pr in self.state.pending_prs}
-        for epic in sprint_status.active_epic_ids():
+        active_epics = sprint_status.active_epic_ids()
+        start_index = self.selection_start_epic_index(sprint_status)
+        for epic in active_epics[start_index:]:
             if not self.epic_matches_patterns(epic, sprint_status):
                 continue
             if epic in completed or epic in pending:
@@ -1048,13 +1376,78 @@ class AutopilotRunner:
     # Prompt builders
     # ------------------------------------------------------------------
 
-    def build_dev_story_prompt(self, epic_id: str, sprint_status: SprintStatus, story_files: list[Path]) -> str:
-        return "$bmad-dev-story\n"
+    def build_dev_story_prompt(
+        self,
+        epic_id: str,
+        sprint_status: SprintStatus,
+        story_files: list[Path],
+        *,
+        sprint_status_file: Path,
+    ) -> str:
+        story_context = "\n".join(f"- {path}" for path in story_files)
+        review_context = self.latest_review_artifact_prompt()
+        parts = [
+            "$bmad-dev-story",
+            "",
+            "Epic context:",
+            f"- Epic: {epic_id}",
+            f"- Sprint status: {sprint_status_file}",
+            "- Story files:",
+            story_context or "  - (none)",
+        ]
+        if review_context:
+            parts.extend(["", review_context])
+        return "\n".join(parts).strip() + "\n"
 
-    def build_qa_prompt(self, epic_id: str, sprint_status: SprintStatus, story_files: list[Path]) -> str:
-        return "$integration-tests-workflow\n"
+    def build_story_create_prompt(self, story_key: str, story_path: Path) -> str:
+        return dedent(
+            f"""
+            $bmad-create-story
 
-    def build_code_review_prompt(self, epic_id: str) -> str:
+            Target story:
+            - Story key: {story_key}
+            - Story file: {story_path}
+
+            Create or refresh exactly this story. Do not select a different backlog item.
+            """
+        ).strip() + "\n"
+
+    def build_story_dev_prompt(self, story_key: str, story_path: Path, sprint_status_file: Path) -> str:
+        review_context = self.latest_review_artifact_prompt()
+        parts = [
+            "$bmad-dev-story",
+            "",
+            "Story context:",
+            f"- Story key: {story_key}",
+            f"- Story file: {story_path}",
+            f"- Sprint status: {sprint_status_file}",
+        ]
+        if review_context:
+            parts.extend(["", review_context])
+        return dedent(
+            "\n".join(parts)
+            + "\n\nUse the explicit story file above. Do not switch to a different story."
+        ).strip() + "\n"
+
+    def build_story_qa_prompt(self, story_key: str, story_path: Path) -> str:
+        return dedent(
+            f"""
+            $integration-tests-workflow
+
+            Reference:
+            - Integration test spec: {self.project_root / "specs" / "integration-tests.md"}
+            - Follow the INT-xxx catalog and HTTP/system-boundary rules from that spec.
+            - Use ./scripts/run_integration_tests.sh as the execution entrypoint.
+
+            Story context:
+            - Story key: {story_key}
+            - Story file: {story_path}
+
+            Focus on the automated validation that supports this story and its acceptance criteria.
+            """
+        ).strip() + "\n"
+
+    def build_story_code_review_prompt(self, story_key: str, story_path: Path) -> str:
         current_branch = self.run_text(["git", "branch", "--show-current"], cwd=self.project_root, check=False, capture_output=True).strip()
         branch_diff = self.run_text(
             ["git", "diff", "--name-only", f"origin/{self.base_branch}..HEAD"],
@@ -1063,6 +1456,153 @@ class AutopilotRunner:
             capture_output=True,
         ).strip()
         working_tree = self.run_text(["git", "status", "--short"], cwd=self.project_root, check=False, capture_output=True).strip()
+        return dedent(
+            f"""
+            $bmad-code-review
+
+            Review target:
+            - Story: {story_key}
+            - Story file: {story_path}
+            - Branch: {current_branch or 'detached'}
+            - Base branch: origin/{self.base_branch}
+            - Source: branch diff vs origin/{self.base_branch}
+
+            Changed files:
+            {branch_diff or "(none)"}
+
+            Working tree status:
+            {working_tree or "(clean)"}
+
+            Review the branch diff first. If the tree is clean, review the latest commits on the branch.
+            Do not ask for a diff source; use the context above.
+            """
+        ).strip() + "\n"
+
+    def build_qa_prompt(
+        self,
+        epic_id: str,
+        sprint_status: SprintStatus,
+        story_files: list[Path],
+        *,
+        repo_root: Path | None = None,
+    ) -> str:
+        repo_root = repo_root or self.project_root
+        story_context = "\n".join(f"- {path}" for path in story_files)
+        return dedent(
+            f"""
+            $integration-tests-workflow
+
+            Reference:
+            - Integration test spec: {repo_root / "specs" / "integration-tests.md"}
+            - Follow the INT-xxx catalog and HTTP/system-boundary rules from that spec.
+            - Use ./scripts/run_integration_tests.sh as the execution entrypoint.
+
+            Epic context:
+            - Epic: {epic_id}
+            - Story files:
+            {story_context or "  - (none)"}
+
+            Run the relevant integration coverage for this epic and report exact deterministic failures.
+            """
+        ).strip() + "\n"
+
+    def review_artifacts_dir(self) -> Path:
+        return self.project_root / "_bmad-outputs" / "review-artifacts"
+
+    def next_review_round(self, review_type: str) -> int:
+        review_dir = self.review_artifacts_dir()
+        pattern = re.compile(rf"^{re.escape(review_type)}-round-(\d+)\.md$")
+        highest_round = 0
+        if review_dir.exists():
+            for path in review_dir.glob(f"{review_type}-round-*.md"):
+                match = pattern.match(path.name)
+                if match:
+                    highest_round = max(highest_round, int(match.group(1)))
+        return highest_round + 1
+
+    def latest_review_artifacts(self) -> dict[str, Path]:
+        review_dir = self.review_artifacts_dir()
+        latest: dict[str, tuple[int, Path]] = {}
+        if not review_dir.exists():
+            return {}
+        for review_type in ("code-review", "qa-review"):
+            pattern = re.compile(rf"^{re.escape(review_type)}-round-(\d+)\.md$")
+            for path in review_dir.glob(f"{review_type}-round-*.md"):
+                match = pattern.match(path.name)
+                if not match:
+                    continue
+                round_number = int(match.group(1))
+                current = latest.get(review_type)
+                if current is None or round_number > current[0]:
+                    latest[review_type] = (round_number, path)
+        return {review_type: path for review_type, (_round_number, path) in latest.items()}
+
+    def latest_review_artifact_prompt(self) -> str:
+        latest = self.latest_review_artifacts()
+        if not latest:
+            return ""
+
+        lines = [
+            "Latest persisted review artifacts:",
+        ]
+        for review_type in ("code-review", "qa-review"):
+            path = latest.get(review_type)
+            if path:
+                lines.append(f"- {review_type}: {path}")
+        lines.append("Read the latest persisted review files above before making further dev-story changes.")
+        return "\n".join(lines)
+
+    def persist_review_artifact(
+        self,
+        review_type: str,
+        *,
+        phase_name: str,
+        source_output: Path,
+        return_code: int,
+        output_text: str,
+        context_lines: list[str],
+        status_hint: str | None = None,
+    ) -> Path:
+        round_number = self.next_review_round(review_type)
+        artifact_path = self.review_artifacts_dir() / f"{review_type}-round-{round_number}.md"
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+
+        lines = [
+            f"# {review_type.replace('-', ' ').title()} Round {round_number}",
+            "",
+            f"- Timestamp: {utc_now()}",
+            f"- Phase: {phase_name}",
+            f"- Return code: {return_code}",
+            f"- Source output: {source_output}",
+        ]
+        if status_hint:
+            lines.append(f"- Status marker: {status_hint}")
+        if context_lines:
+            lines.append("- Context:")
+            lines.extend(f"  - {line}" for line in context_lines)
+        lines.extend(
+            [
+                "",
+                "---",
+                "",
+                output_text.rstrip() or "(empty)",
+                "",
+            ]
+        )
+        write_text(artifact_path, "\n".join(lines))
+        self.log(f"📝 Saved {review_type} review artifact: {artifact_path}")
+        return artifact_path
+
+    def build_code_review_prompt(self, epic_id: str, *, repo_root: Path | None = None) -> str:
+        repo_root = repo_root or self.project_root
+        current_branch = self.run_text(["git", "branch", "--show-current"], cwd=repo_root, check=False, capture_output=True).strip()
+        branch_diff = self.run_text(
+            ["git", "diff", "--name-only", f"origin/{self.base_branch}..HEAD"],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+        ).strip()
+        working_tree = self.run_text(["git", "status", "--short"], cwd=repo_root, check=False, capture_output=True).strip()
         return dedent(
             f"""
             $bmad-code-review
@@ -1084,24 +1624,80 @@ class AutopilotRunner:
             """
         ).strip() + "\n"
 
-    def build_commit_split_prompt(self, epic_id: str) -> str:
-        current_branch = self.run_text(["git", "branch", "--show-current"], cwd=self.project_root, check=False, capture_output=True).strip()
-        working_tree = self.run_text(["git", "status", "--short"], cwd=self.project_root, check=False, capture_output=True).strip()
+    def build_commit_split_prompt(
+        self,
+        *,
+        epic_id: str | None = None,
+        story_key: str | None = None,
+        story_path: Path | None = None,
+        story_files: list[Path] | None = None,
+        repo_root: Path | None = None,
+    ) -> str:
+        repo_root = repo_root or self.project_root
+        current_branch = self.run_text(["git", "branch", "--show-current"], cwd=repo_root, check=False, capture_output=True).strip()
+        working_tree = self.run_text(["git", "status", "--short"], cwd=repo_root, check=False, capture_output=True).strip()
+
+        context_lines: list[str] = []
+        if story_key and story_path:
+            context_lines.append(f"- Story: {story_key}")
+            context_lines.append(f"- Story file: {story_path}")
+        if epic_id:
+            context_lines.append(f"- Epic: {epic_id}")
+        if story_files:
+            context_lines.append("- Story files:")
+            context_lines.extend(f"  - {path}" for path in story_files)
+        if not context_lines:
+            context_lines.append("- Context: no specific story or epic context available")
+        context_text = "\n".join(context_lines)
+
         return dedent(
             f"""
             $commit-split-workflow
 
             Context:
-            - Epic: {epic_id}
-            - Branch: {current_branch or f'feature/epic-{epic_id}'}
-            - Goal: split the current story implementation into small, reviewable commits.
+            {context_text}
+            - Branch: {current_branch or 'detached'}
+            - Goal: split the current implementation into small, reviewable commits.
 
             Working tree status:
             {working_tree or "(clean)"}
 
-            Use the repository's commit-message conventions and make the commit history easy to review.
+            Use the repository's commit-message conventions and keep commit groups aligned to intent.
             """
         ).strip() + "\n"
+
+    def update_story_file_status(self, story_file: Path, new_status: str) -> None:
+        if not story_file.exists():
+            raise ValueError(f"Missing story file: {story_file}")
+        text = read_text(story_file)
+        updated, count = re.subn(r"^Status:\s*.*$", f"Status: {new_status}", text, count=1, flags=re.MULTILINE)
+        if count == 0:
+            raise ValueError(f"Could not find Status line in story file: {story_file}")
+        write_text(story_file, updated)
+
+    def update_sprint_status_story_done(self, story_key: str) -> None:
+        if not self.sprint_status_file.exists():
+            raise ValueError(f"Missing sprint status file: {self.sprint_status_file}")
+
+        raw = read_text(self.sprint_status_file)
+        now = utc_now()
+        updated, count = re.subn(
+            rf"^(\s*{re.escape(story_key)}:\s*)([A-Za-z0-9_-]+)\s*$",
+            rf"\1done",
+            raw,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if count == 0:
+            raise ValueError(f"Story key not found in sprint status: {story_key}")
+
+        updated = re.sub(r"^# last_updated: .*$", f"# last_updated: {now}", updated, count=1, flags=re.MULTILINE)
+        updated = re.sub(r"^last_updated: .*$", f"last_updated: {now}", updated, count=1, flags=re.MULTILINE)
+        write_text(self.sprint_status_file, updated)
+
+    def mark_story_done(self, story_key: str, story_path: Path) -> None:
+        self.update_story_file_status(story_path, "done")
+        self.update_sprint_status_story_done(story_key)
 
     def build_fix_issues_prompt(self, issues: str) -> str:
         return dedent(
@@ -1153,11 +1749,12 @@ class AutopilotRunner:
     # Phase helpers
     # ------------------------------------------------------------------
 
-    def autopilot_checks(self) -> bool:
+    def autopilot_checks(self, root: Path | None = None) -> bool:
+        root = root or self.project_root
         ok = True
-        backend = self.project_root / "backend" / "Cargo.toml"
-        frontend = self.project_root / "frontend" / "package.json"
-        mobile = self.project_root / "mobile-native" / "gradlew"
+        backend = root / "backend" / "Cargo.toml"
+        frontend = root / "frontend" / "package.json"
+        mobile = root / "mobile-native" / "gradlew"
 
         if backend.exists():
             self.run_process(["cargo", "fmt", "--check"], cwd=backend.parent)
@@ -1178,6 +1775,260 @@ class AutopilotRunner:
             self.run_process(["./gradlew", "build"], cwd=mobile.parent)
 
         return ok
+
+    def phase_find_story(self) -> None:
+        self.log("📋 PHASE: FIND_STORY")
+        try:
+            sprint_status = self.load_sprint_status()
+        except ValueError as exc:
+            self.log(f"❌ {exc}")
+            self.state_set(Phase.BLOCKED, None)
+            return
+
+        try:
+            target = self.select_next_story(sprint_status)
+        except ValueError as exc:
+            self.log(f"❌ {exc}")
+            self.state_set(Phase.BLOCKED, None)
+            return
+
+        if not target:
+            self.log("🎉 No more active stories in sprint-status.yaml")
+            self.state_set(Phase.DONE, None)
+            return
+
+        self.log(f"✅ Found story: {target.key} [{target.status.value}]")
+        if target.status == SprintStatusValue.BACKLOG:
+            self.state_set_story(Phase.CREATE_STORY, target.key, target.path)
+            return
+        if target.status in {SprintStatusValue.READY_FOR_DEV, SprintStatusValue.IN_PROGRESS}:
+            self.state_set_story(Phase.DEVELOP_STORIES, target.key, target.path)
+            return
+        if target.status == SprintStatusValue.REVIEW:
+            self.state_set_story(Phase.CODE_REVIEW, target.key, target.path)
+            return
+
+        self.log(f"❌ Unsupported story status: {target.status.value}")
+        self.state_set(Phase.BLOCKED, None)
+
+    def phase_create_story(self) -> None:
+        self.log("📝 PHASE: CREATE_STORY")
+        story_key = self.state_current_story()
+        if not story_key:
+            self.log("❌ current_story missing")
+            self.state_set(Phase.BLOCKED, None)
+            return
+
+        try:
+            sprint_status = self.load_sprint_status()
+        except ValueError as exc:
+            self.log(f"❌ {exc}")
+            self.state_set(Phase.BLOCKED, None)
+            return
+
+        story_path = self.story_file_for_key(sprint_status, story_key)
+        output_file = self.tmp_dir / "create-story-output.txt"
+        return_code = self.run_codex_exec(
+            self.build_story_create_prompt(story_key, story_path),
+            output_file,
+            cwd=self.project_root,
+        )
+        if return_code != 0:
+            self.log("❌ Codex reported create-story failed")
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
+
+        try:
+            refreshed = self.load_sprint_status()
+            story_status = dict(refreshed.story_entries()).get(story_key)
+            if story_status == SprintStatusValue.BACKLOG:
+                self.log(f"⚠️ Story {story_key} is still backlog after create-story; continuing anyway")
+            else:
+                self.log(f"✅ Story {story_key} is now {story_status.value if story_status else 'unknown'}")
+        except Exception as exc:
+            self.log(f"⚠️ Unable to verify created story status: {exc}")
+
+        self.state_set(Phase.FIND_EPIC, None)
+
+    def phase_develop_story(self) -> None:
+        self.log("💻 PHASE: DEVELOP_STORY")
+        story_key = self.state_current_story()
+        if not story_key:
+            self.log("❌ current_story missing")
+            self.state_set(Phase.BLOCKED, None)
+            return
+
+        try:
+            sprint_status = self.load_sprint_status()
+            target = dict(sprint_status.story_entries()).get(story_key)
+            if target is None:
+                raise ValueError(f"Missing story entry in sprint status: {story_key}")
+            story_path = self.story_file_for_key(sprint_status, story_key)
+            if target == SprintStatusValue.REVIEW:
+                self.log(f"⏯️ Story {story_key} is already in review; skipping back to QA")
+                self.state_set_story(Phase.QA_AUTOMATION_TEST, story_key, story_path)
+                return
+            if target == SprintStatusValue.DONE:
+                self.log(f"⏯️ Story {story_key} is already done; selecting the next story")
+                self.state_set(Phase.FIND_EPIC, None)
+                return
+            if target != SprintStatusValue.BACKLOG and not story_path.exists():
+                raise ValueError(f"Missing story file for story {story_key}: {story_path}")
+        except ValueError as exc:
+            self.log(f"❌ {exc}")
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
+
+        self.log(f"📄 Sprint status source: {sprint_status_file}")
+        self.log(f"📄 Story context: {story_path}")
+
+        output_file = self.tmp_dir / "develop-story-output.txt"
+        return_code = self.run_codex_exec(
+            self.build_story_dev_prompt(story_key, story_path, self.sprint_status_file),
+            output_file,
+            cwd=self.project_root,
+        )
+        output_text = read_text(output_file)
+        if return_code != 0 or "STATUS: STORIES_BLOCKED" in output_text:
+            self.log("❌ Codex reported story development blocked")
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
+
+        if "STATUS: STORIES_COMPLETE" not in output_text:
+            self.log("⚠️ Codex did not report STORIES_COMPLETE; continuing cautiously")
+
+        self.log("Running local checks gate...")
+        try:
+            self.autopilot_checks()
+        except Exception as exc:
+            self.log(f"⚠️ Local checks failed after story development: {exc}")
+
+        self.state_set_story(Phase.COMMIT_SPLIT, story_key, story_path)
+        self.log("✅ Story implementation complete; running commit split workflow next")
+
+    def phase_qa_automation_test_story(self) -> None:
+        self.log("🧪 PHASE: QA_AUTOMATION_TEST")
+        story_key = self.state_current_story()
+        if not story_key:
+            self.log("❌ current_story missing")
+            self.state_set(Phase.BLOCKED, None)
+            return
+
+        try:
+            sprint_status = self.load_sprint_status()
+            target = dict(sprint_status.story_entries()).get(story_key)
+            if target is None:
+                raise ValueError(f"Missing story entry in sprint status: {story_key}")
+            story_path = self.story_file_for_key(sprint_status, story_key)
+            if target == SprintStatusValue.BACKLOG:
+                raise ValueError(f"Story {story_key} is still backlog and cannot run QA")
+            if target == SprintStatusValue.DONE:
+                self.log(f"⏯️ Story {story_key} is already done; selecting the next story")
+                self.state_set(Phase.FIND_EPIC, None)
+                return
+        except ValueError as exc:
+            self.log(f"❌ {exc}")
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
+
+        self.log(f"📄 Sprint status source: {sprint_status_file}")
+        self.log(f"📄 Story context: {story_path}")
+
+        output_file = self.tmp_dir / "qa-story-output.txt"
+        return_code = self.run_codex_exec(self.build_story_qa_prompt(story_key, story_path), output_file, cwd=self.project_root)
+        output_text = read_text(output_file)
+        self.persist_review_artifact(
+            "qa-review",
+            phase_name=Phase.QA_AUTOMATION_TEST.value,
+            source_output=output_file,
+            return_code=return_code,
+            output_text=output_text,
+            context_lines=[
+                f"Story: {story_key}",
+                f"Story file: {story_path}",
+                f"Sprint status: {self.sprint_status_file}",
+            ],
+            status_hint="STATUS: QA_BLOCKED" if "STATUS: QA_BLOCKED" in output_text else ("STATUS: QA_COMPLETE" if "STATUS: QA_COMPLETE" in output_text else None),
+        )
+        if return_code != 0 or "STATUS: QA_BLOCKED" in output_text:
+            self.log("❌ Codex reported QA blocked")
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
+        if "STATUS: QA_COMPLETE" not in output_text:
+            self.log("⚠️ Codex did not report QA_COMPLETE; continuing cautiously")
+
+        self.log("Running local checks gate...")
+        try:
+            self.autopilot_checks()
+        except Exception as exc:
+            self.log(f"⚠️ Local checks failed after QA automation: {exc}")
+
+        self.state_set_story(Phase.CODE_REVIEW, story_key, story_path)
+        self.play_sound("review_ready")
+        self.log("✅ QA automation complete")
+
+    def phase_code_review_story(self) -> None:
+        self.log("🔍 PHASE: CODE_REVIEW")
+        story_key = self.state_current_story()
+        if not story_key:
+            self.log("❌ current_story missing")
+            self.state_set(Phase.BLOCKED, None)
+            return
+
+        try:
+            sprint_status = self.load_sprint_status()
+            target = dict(sprint_status.story_entries()).get(story_key)
+            if target is None:
+                raise ValueError(f"Missing story entry in sprint status: {story_key}")
+            story_path = self.story_file_for_key(sprint_status, story_key)
+            if target == SprintStatusValue.DONE:
+                self.log(f"⏯️ Story {story_key} is already done; selecting the next story")
+                self.state_set(Phase.FIND_EPIC, None)
+                return
+            if target == SprintStatusValue.BACKLOG:
+                raise ValueError(f"Story {story_key} is still backlog and cannot be reviewed")
+            if target != SprintStatusValue.BACKLOG and not story_path.exists():
+                raise ValueError(f"Missing story file for story {story_key}: {story_path}")
+        except ValueError as exc:
+            self.log(f"❌ {exc}")
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
+
+        self.log(f"Running BMAD code-review workflow for story {story_key}")
+        output_file = self.tmp_dir / "code-review-output.txt"
+        return_code = self.run_codex_exec(self.build_story_code_review_prompt(story_key, story_path), output_file, cwd=self.project_root)
+        output_text = read_text(output_file)
+        self.persist_review_artifact(
+            "code-review",
+            phase_name=Phase.CODE_REVIEW.value,
+            source_output=output_file,
+            return_code=return_code,
+            output_text=output_text,
+            context_lines=[
+                f"Story: {story_key}",
+                f"Story file: {story_path}",
+                f"Sprint status: {self.sprint_status_file}",
+            ],
+            status_hint="STATUS: CODE_REVIEW_DONE" if "STATUS: CODE_REVIEW_DONE" in output_text else None,
+        )
+        if return_code != 0 or "STATUS: CODE_REVIEW_DONE" not in output_text:
+            self.log("⚠️ Codex did not report CODE_REVIEW_DONE cleanly")
+
+        try:
+            self.autopilot_checks()
+        except Exception as exc:
+            self.log(f"⚠️ Local checks failed after code review: {exc}")
+
+        try:
+            self.mark_story_done(story_key, story_path)
+        except Exception as exc:
+            self.log(f"❌ Failed to mark story done: {exc}")
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
+
+        self.play_sound("review_complete")
+        self.state_set(Phase.FIND_EPIC, None)
+        self.log("✅ Code review passed; story marked done")
 
     def phase_check_pending_pr(self) -> None:
         self.log("🔍 PHASE: CHECK_PENDING_PR")
@@ -1209,8 +2060,20 @@ class AutopilotRunner:
             self.tmp_dir.joinpath("copilot_latest.json").unlink(missing_ok=True)
 
             self.run_process(["git", "fetch", "origin", open_epic_branch], cwd=self.project_root, check=False)
-            self.run_process(["git", "checkout", "-B", open_epic_branch, f"origin/{open_epic_branch}"], cwd=self.project_root, check=False)
             epic_id = open_epic_branch.removeprefix("feature/epic-")
+            wt_path = self.worktree_path(epic_id)
+            if not wt_path.exists():
+                try:
+                    self.worktree_create(
+                        epic_id,
+                        open_epic_branch,
+                        start_point=f"origin/{open_epic_branch}",
+                        prefer_existing_branch=True,
+                    )
+                except Exception as exc:
+                    self.log(f"⚠️ Could not create worktree for open PR #{pr_number_str}: {exc}")
+            if wt_path.exists():
+                self.set_active_worktree(wt_path)
             self.state_set(Phase.WAIT_COPILOT, epic_id)
             return
 
@@ -1235,8 +2098,6 @@ class AutopilotRunner:
                         self.log(f"📝 Found new commit(s) since merge - will create new PR")
                         self.state_set(Phase.CODE_REVIEW, epic_id)
                         return
-                    self.run_process(["git", "checkout", self.base_branch], cwd=self.project_root, check=False)
-                    self.run_process(["git", "pull", "origin", self.base_branch], cwd=self.project_root, check=False)
                 if pr_state == "CLOSED":
                     self.log(f"⚠️ PR #{pr_number} was closed (not merged)")
                     diff_names = self.run_text(["git", "diff", f"origin/{self.base_branch}..HEAD", "--name-only"], cwd=self.project_root, check=False)
@@ -1301,15 +2162,16 @@ class AutopilotRunner:
 
         branch_name = f"feature/epic-{epic_id}"
         self.log(f"Creating branch: {branch_name}")
-        self.run_process(["git", "fetch", "origin"], cwd=self.project_root, check=False)
-        self.run_process(["git", "checkout", self.base_branch], cwd=self.project_root, check=False)
-        self.run_process(["git", "pull", "origin", self.base_branch], cwd=self.project_root, check=False)
-        self.run_process(["git", "checkout", "-b", branch_name], cwd=self.project_root, check=False)
-        self.run_process(["git", "push", "-u", "origin", branch_name], cwd=self.project_root, check=False)
+        wt_path = self.worktree_create(epic_id, branch_name, start_point=f"origin/{self.base_branch}")
+        self.set_active_worktree(wt_path)
+        self.run_process(["git", "push", "-u", "origin", branch_name], cwd=wt_path, check=False)
         self.state_set(Phase.DEVELOP_STORIES, epic_id)
         self.log(f"✅ Branch ready: {branch_name}")
 
     def phase_develop_stories(self) -> None:
+        if self.is_story_flow():
+            self.phase_develop_story()
+            return
         self.log("💻 PHASE: DEVELOP_STORIES")
         epic_id = self.state_current_epic()
         if not epic_id:
@@ -1317,24 +2179,32 @@ class AutopilotRunner:
             self.state_set(Phase.BLOCKED, None)
             return
 
-        if self.run_text(["git", "status", "--porcelain"], cwd=self.project_root, check=False).strip():
+        workspace_root = self.epic_workspace_root(epic_id)
+        sprint_status_file = self.sprint_status_path(workspace_root)
+
+        if self.run_text(["git", "status", "--porcelain"], cwd=workspace_root, check=False).strip():
             self.log("⚠️ Git working tree not clean - committing pending changes first")
-            self.run_process(["git", "add", "-A"], cwd=self.project_root, check=False)
-            self.run_process(["git", "commit", "-m", "chore: auto-commit before story development"], cwd=self.project_root, check=False)
+            self.run_process(["git", "add", "-A"], cwd=workspace_root, check=False)
+            self.run_process(["git", "commit", "-m", "chore: auto-commit before story development"], cwd=workspace_root, check=False)
 
         try:
-            sprint_status = self.load_sprint_status()
-            story_files = sprint_status.story_files_for_epic(self.project_root, epic_id)
+            sprint_status = self.load_sprint_status(root=workspace_root)
+            story_files = sprint_status.story_files_for_epic(workspace_root, epic_id)
         except ValueError as exc:
             self.log(f"❌ {exc}")
             self.state_set(Phase.BLOCKED, epic_id)
             return
-        self.log(f"📄 Sprint status source: {self.sprint_status_file}")
+        self.log(f"📄 Sprint status source: {sprint_status_file}")
         for story_file in story_files:
             self.log(f"📄 Story context: {story_file}")
 
         output_file = self.tmp_dir / "develop-stories-output.txt"
-        return_code = self.run_codex_exec(self.build_dev_story_prompt(epic_id, sprint_status, story_files), output_file, cwd=self.project_root)
+        return_code = self.run_codex_exec(
+            self.build_dev_story_prompt(epic_id, sprint_status, story_files, sprint_status_file=sprint_status_file),
+            output_file,
+            cwd=workspace_root,
+            reasoning_effort="high",
+        )
         output_text = read_text(output_file)
         if return_code != 0 or "STATUS: STORIES_BLOCKED" in output_text:
             self.log("❌ Codex reported stories blocked")
@@ -1345,7 +2215,7 @@ class AutopilotRunner:
 
         self.log("Running local checks gate...")
         try:
-            self.autopilot_checks()
+            self.autopilot_checks(workspace_root)
         except Exception as exc:
             self.log(f"⚠️ Local checks failed after story development: {exc}")
 
@@ -1354,18 +2224,53 @@ class AutopilotRunner:
 
     def phase_commit_split(self) -> None:
         self.log("🪓 PHASE: COMMIT_SPLIT")
-        epic_id = self.state_current_epic()
-        if not epic_id:
-            self.log("❌ current_epic missing")
-            self.state_set(Phase.BLOCKED, None)
-            return
 
         output_file = self.tmp_dir / "commit-split-output.txt"
+
+        if self.is_story_flow():
+            story_key = self.state_current_story()
+            if not story_key:
+                self.log("❌ current_story missing")
+                self.state_set(Phase.BLOCKED, None)
+                return
+
+            try:
+                sprint_status = self.load_sprint_status()
+                target = dict(sprint_status.story_entries()).get(story_key)
+                if target is None:
+                    raise ValueError(f"Missing story entry in sprint status: {story_key}")
+                story_path = self.story_file_for_key(sprint_status, story_key)
+            except ValueError as exc:
+                self.log(f"❌ {exc}")
+                self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+                return
+
+            prompt = self.build_commit_split_prompt(story_key=story_key, story_path=story_path)
+            after_split_state = (Phase.QA_AUTOMATION_TEST, story_key, story_path)
+        else:
+            epic_id = self.state_current_epic()
+            if not epic_id:
+                self.log("❌ current_epic missing")
+                self.state_set(Phase.BLOCKED, None)
+                return
+
+            workspace_root = self.epic_workspace_root(epic_id)
+            try:
+                sprint_status = self.load_sprint_status(root=workspace_root)
+                story_files = sprint_status.story_files_for_epic(workspace_root, epic_id)
+            except ValueError as exc:
+                self.log(f"❌ {exc}")
+                self.state_set(Phase.BLOCKED, epic_id)
+                return
+
+            prompt = self.build_commit_split_prompt(epic_id=epic_id, story_files=story_files, repo_root=workspace_root)
+            after_split_state = (Phase.QA_AUTOMATION_TEST, epic_id, None)
+
+        commit_root = workspace_root if not self.is_story_flow() else self.project_root
         return_code = self.run_codex_exec(
-            self.build_commit_split_prompt(epic_id),
+            prompt,
             output_file,
-            cwd=self.project_root,
-            model=self.codex_model,
+            cwd=commit_root,
             reasoning_effort=self.commit_split_reasoning_effort,
         )
         output_text = read_text(output_file)
@@ -1373,13 +2278,23 @@ class AutopilotRunner:
             self.log("❌ Codex reported commit split failed")
             if output_text.strip():
                 self.verbose(output_text.strip())
-            self.state_set(Phase.BLOCKED, epic_id)
+            if self.is_story_flow():
+                self.state_set(Phase.BLOCKED, after_split_state[1])
+            else:
+                self.state_set(Phase.BLOCKED, after_split_state[1])
             return
 
         self.log("✅ Commit split workflow complete")
-        self.state_set(Phase.QA_AUTOMATION_TEST, epic_id)
+        next_phase, entity_id, story_path = after_split_state
+        if self.is_story_flow():
+            self.state_set_story(next_phase, entity_id, story_path)
+        else:
+            self.state_set(next_phase, entity_id)
 
     def phase_qa_automation_test(self) -> None:
+        if self.is_story_flow():
+            self.phase_qa_automation_test_story()
+            return
         self.log("🧪 PHASE: QA_AUTOMATION_TEST")
         epic_id = self.state_current_epic()
         if not epic_id:
@@ -1387,20 +2302,40 @@ class AutopilotRunner:
             self.state_set(Phase.BLOCKED, None)
             return
 
+        workspace_root = self.epic_workspace_root(epic_id)
         try:
-            sprint_status = self.load_sprint_status()
-            story_files = sprint_status.story_files_for_epic(self.project_root, epic_id)
+            sprint_status = self.load_sprint_status(root=workspace_root)
+            story_files = sprint_status.story_files_for_epic(workspace_root, epic_id)
         except ValueError as exc:
             self.log(f"❌ {exc}")
             self.state_set(Phase.BLOCKED, epic_id)
             return
-        self.log(f"📄 Sprint status source: {self.sprint_status_file}")
+        sprint_status_file = self.sprint_status_path(workspace_root)
+        self.log(f"📄 Sprint status source: {sprint_status_file}")
         for story_file in story_files:
             self.log(f"📄 Story context: {story_file}")
 
         output_file = self.tmp_dir / "qa-automation-output.txt"
-        return_code = self.run_codex_exec(self.build_qa_prompt(epic_id, sprint_status, story_files), output_file, cwd=self.project_root)
+        return_code = self.run_codex_exec(
+            self.build_qa_prompt(epic_id, sprint_status, story_files, repo_root=workspace_root),
+            output_file,
+            cwd=workspace_root,
+        )
         output_text = read_text(output_file)
+        self.persist_review_artifact(
+            "qa-review",
+            phase_name=Phase.QA_AUTOMATION_TEST.value,
+            source_output=output_file,
+            return_code=return_code,
+            output_text=output_text,
+            context_lines=[
+                f"Epic: {epic_id}",
+                f"Sprint status: {sprint_status_file}",
+                "Story files:",
+                *[f"{path}" for path in story_files],
+            ],
+            status_hint="STATUS: QA_BLOCKED" if "STATUS: QA_BLOCKED" in output_text else ("STATUS: QA_COMPLETE" if "STATUS: QA_COMPLETE" in output_text else None),
+        )
         if return_code != 0 or "STATUS: QA_BLOCKED" in output_text:
             self.log("❌ Codex reported QA blocked")
             self.state_set(Phase.BLOCKED, epic_id)
@@ -1410,14 +2345,18 @@ class AutopilotRunner:
 
         self.log("Running local checks gate...")
         try:
-            self.autopilot_checks()
+            self.autopilot_checks(workspace_root)
         except Exception as exc:
             self.log(f"⚠️ Local checks failed after QA automation: {exc}")
 
         self.state_set(Phase.CODE_REVIEW, epic_id)
+        self.play_sound("review_ready")
         self.log("✅ QA automation complete")
 
     def phase_code_review(self) -> None:
+        if self.is_story_flow():
+            self.phase_code_review_story()
+            return
         self.log("🔍 PHASE: CODE_REVIEW")
         epic_id = self.state_current_epic()
         if not epic_id:
@@ -1425,21 +2364,49 @@ class AutopilotRunner:
             self.state_set(Phase.BLOCKED, None)
             return
 
+        workspace_root = self.epic_workspace_root(epic_id)
+        try:
+            sprint_status = self.load_sprint_status(root=workspace_root)
+            story_files = sprint_status.story_files_for_epic(workspace_root, epic_id)
+        except ValueError as exc:
+            self.log(f"❌ {exc}")
+            self.state_set(Phase.BLOCKED, epic_id)
+            return
+
         self.log(f"Running BMAD code-review workflow for epic {epic_id}")
         output_file = self.tmp_dir / "code-review-output.txt"
-        return_code = self.run_codex_exec(self.build_code_review_prompt(epic_id), output_file, cwd=self.project_root)
+        return_code = self.run_codex_exec(
+            self.build_code_review_prompt(epic_id, repo_root=workspace_root),
+            output_file,
+            cwd=workspace_root,
+        )
         output_text = read_text(output_file)
+        self.persist_review_artifact(
+            "code-review",
+            phase_name=Phase.CODE_REVIEW.value,
+            source_output=output_file,
+            return_code=return_code,
+            output_text=output_text,
+            context_lines=[
+                f"Epic: {epic_id}",
+                f"Base branch: origin/{self.base_branch}",
+                "Story files:",
+                *[f"{path}" for path in story_files],
+            ],
+            status_hint="STATUS: CODE_REVIEW_DONE" if "STATUS: CODE_REVIEW_DONE" in output_text else None,
+        )
         if return_code != 0 or "STATUS: CODE_REVIEW_DONE" not in output_text:
             self.log("⚠️ Codex did not report CODE_REVIEW_DONE cleanly")
 
         try:
-            self.autopilot_checks()
+            self.autopilot_checks(workspace_root)
         except Exception as exc:
             self.log(f"⚠️ Local checks failed after code review: {exc}")
             self.state_set(Phase.BLOCKED, epic_id)
             return
 
-        self.run_process(["git", "push"], cwd=self.project_root, check=False)
+        self.play_sound("review_complete")
+        self.run_process(["git", "push"], cwd=workspace_root, check=False)
         self.state_set(Phase.CREATE_PR, epic_id)
         self.log("✅ Code review passed")
 
@@ -1451,8 +2418,9 @@ class AutopilotRunner:
             self.state_set(Phase.BLOCKED, None)
             return
 
+        workspace_root = self.epic_workspace_root(epic_id)
         pr_number = 0
-        pr_view = self.run_json(["gh", "pr", "view", "--json", "number"], cwd=self.project_root, check=False)
+        pr_view = self.run_json(["gh", "pr", "view", "--json", "number"], cwd=workspace_root, check=False)
         if isinstance(pr_view, dict) and pr_view.get("number"):
             pr_number = int(pr_view["number"])
         else:
@@ -1468,10 +2436,10 @@ class AutopilotRunner:
                 "--label",
                 f"epic-{epic_id}",
             ]
-            create_result = self.run_process(create_command, cwd=self.project_root, check=False)
+            create_result = self.run_process(create_command, cwd=workspace_root, check=False)
             if create_result.returncode != 0:
-                self.run_process(["gh", "pr", "create", "--fill"], cwd=self.project_root, check=False)
-            pr_view = self.run_json(["gh", "pr", "view", "--json", "number"], cwd=self.project_root, check=False) or {}
+                self.run_process(["gh", "pr", "create", "--fill"], cwd=workspace_root, check=False)
+            pr_view = self.run_json(["gh", "pr", "view", "--json", "number"], cwd=workspace_root, check=False) or {}
             pr_number = int(pr_view.get("number", 0) or 0)
 
         if pr_number <= 0:
@@ -1755,6 +2723,30 @@ class AutopilotRunner:
 
     def phase_dispatch(self) -> None:
         phase = self.state_phase()
+        if self.is_story_flow():
+            if phase == Phase.FIND_EPIC:
+                self.phase_find_story()
+            elif phase == Phase.CREATE_STORY:
+                self.phase_create_story()
+            elif phase == Phase.DEVELOP_STORIES:
+                self.phase_develop_stories()
+            elif phase == Phase.COMMIT_SPLIT:
+                self.phase_commit_split()
+            elif phase == Phase.QA_AUTOMATION_TEST:
+                self.phase_qa_automation_test()
+            elif phase == Phase.CODE_REVIEW:
+                self.phase_code_review()
+            elif phase == Phase.BLOCKED:
+                self.log("⚠️ BLOCKED - manual intervention needed")
+                raise SystemExit(1)
+            elif phase == Phase.DONE:
+                self.log("🎉 ALL STORIES COMPLETED!")
+                raise SystemExit(0)
+            else:
+                self.log(f"❌ Unknown phase: {phase}")
+                raise SystemExit(1)
+            return
+
         if phase == Phase.CHECK_PENDING_PR:
             self.phase_check_pending_pr()
         elif phase == Phase.FIND_EPIC:
@@ -1794,9 +2786,58 @@ class AutopilotRunner:
             self.log(f"❌ Unknown phase: {phase}")
             raise SystemExit(1)
 
+    def run_story_flow(self) -> None:
+        if self.config.verbose_mode:
+            self.log("📋 Configuration:")
+            self.log(f"   ROOT_DIR: {self.project_root}")
+            self.log(f"   WORKTREE_DIR: {self.worktree_dir}")
+            self.log(f"   FLOW_MODE: {self.flow_mode}")
+            self.log(f"   MAX_TURNS: {self.config.max_turns}")
+            self.log(f"   CHECK_INTERVAL: {self.config.check_interval}s")
+            self.log(f"   MAX_CHECK_WAIT: {self.config.max_check_wait} iterations")
+            self.log(f"   MAX_COPILOT_WAIT: {self.config.max_copilot_wait} iterations")
+            self.log(f"   DEBUG_MODE: {int(self.config.debug_mode)}")
+            self.log("")
+
+        dirty = self.run_text(["git", "status", "--porcelain"], cwd=self.project_root, check=False).strip()
+        if dirty:
+            self.log("⚠️ WARNING: Git working tree has uncommitted changes")
+            self.log("   Story flow will continue unattended and may build on those changes.")
+
+        if not self.config.epic_pattern:
+            self.log("ℹ️ No epic pattern provided - will process active stories from sprint-status.yaml in order")
+        if self.config.start_from:
+            self.log(f"ℹ️ Start-from selector provided: {self.config.start_from}")
+
+        stale_legacy_state = (
+            self.config.continue_run
+            and self.state_file.exists()
+            and not self.state.current_story
+            and self.state.phase not in {Phase.FIND_EPIC, Phase.CREATE_STORY, Phase.DEVELOP_STORIES, Phase.QA_AUTOMATION_TEST, Phase.CODE_REVIEW, Phase.DONE}
+        )
+
+        if not self.config.continue_run or not self.state_file.exists() or stale_legacy_state:
+            if stale_legacy_state:
+                self.log("ℹ️ Detected stale legacy state; resetting into story flow")
+            self.log("🚀 BMAD Autopilot starting story flow (fresh)")
+            self.state = AutopilotState.initial(self.config.parallel_mode >= 1)
+            self.state_set(Phase.FIND_EPIC, None)
+        else:
+            self.log("🚀 BMAD Autopilot resuming story flow (--continue)")
+
+        while True:
+            phase = self.state_phase()
+            self.log(f"━━━ Current phase: {phase.value} ━━━")
+            self.phase_dispatch()
+            time.sleep(2)
+
     def run(self) -> None:
         self.require_tooling()
         self.ensure_state_file()
+
+        if self.is_story_flow():
+            self.run_story_flow()
+            return
 
         if self.config.verbose_mode:
             self.log("📋 Configuration:")
@@ -1815,7 +2856,7 @@ class AutopilotRunner:
         dirty = self.run_text(["git", "status", "--porcelain"], cwd=self.project_root, check=False).strip()
         if dirty:
             self.log("⚠️ WARNING: Git working tree has uncommitted changes")
-            self.log("   Autopilot may checkout branches which could cause conflicts.")
+            self.log("   Autopilot uses /tmp worktrees for branch work, but stale local state can still confuse resumption.")
             self.log("   Consider committing or stashing your changes first.")
             print("")
             answer = input("Continue anyway? [y/N] ").strip().lower()
@@ -1826,6 +2867,8 @@ class AutopilotRunner:
 
         if not self.config.epic_pattern:
             self.log("ℹ️ No epic pattern provided - will process ALL active epics from sprint-status.yaml in order")
+        if self.config.start_from:
+            self.log(f"ℹ️ Start-from selector provided: {self.config.start_from}")
 
         if self.config.parallel_mode >= 1:
             self.log(f"🔀 PARALLEL MODE enabled (max {self.config.max_pending_prs} concurrent PRs)")
@@ -1875,10 +2918,14 @@ class AutopilotRunner:
 
         if not wt_path.exists():
             self.log(f"🌳 Creating worktree for {epic_id}...")
-            self.worktree_dir.mkdir(parents=True, exist_ok=True)
-            self.run_process(["git", "fetch", "origin", branch_name], cwd=self.project_root, check=False)
-            result = self.run_process(["git", "worktree", "add", str(wt_path), branch_name], cwd=self.project_root, check=False)
-            if result.returncode != 0:
+            try:
+                self.worktree_create(
+                    epic_id,
+                    branch_name,
+                    start_point=f"origin/{branch_name}",
+                    prefer_existing_branch=True,
+                )
+            except Exception:
                 self.log(f"❌ Failed to create worktree for {branch_name}")
                 self.state_restore_active_context()
                 return
@@ -1926,6 +2973,12 @@ class AutopilotRunner:
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="BMAD Autopilot")
     parser.add_argument("epic_pattern", nargs="?", default="")
+    parser.add_argument(
+        "--from",
+        dest="start_from",
+        default="",
+        help="Start selecting from a later story or epic, e.g. 3-1, 3.1, or 3",
+    )
     parser.add_argument("--continue", dest="continue_run", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")

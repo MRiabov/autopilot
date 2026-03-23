@@ -11,10 +11,16 @@
 # Enable debug logging to .autopilot/tmp/debug.log (implies verbose)
 # AUTOPILOT_DEBUG=0
 
+# Flow mode:
+#   auto   = story flow when sprint-status has story rows, otherwise legacy
+#   story  = always use the story-first flow
+#   legacy = keep the old epic/PR flow
+# AUTOPILOT_FLOW=auto
+
 # Legacy prompt budget kept for compatibility
 # MAX_TURNS=80
 
-# Seconds between CI/Copilot status polls
+# Seconds between QA or Copilot status polls
 # CHECK_INTERVAL=30
 
 # Maximum poll iterations before timeout
@@ -32,10 +38,12 @@
 # =============================================================================
 # EXECUTION MODE
 # =============================================================================
-# All modes auto-continue: after creating PR, immediately start the next active epic from sprint status.
-# PR reviews run in background, auto-merged when approved, or paused for fixes.
+# Story flow is the default. It follows the next story in sprint status and
+# marks it done when review passes.
 #
-# PARALLEL_MODE controls worktree usage:
+# Legacy epic/PR flow remains available when AUTOPILOT_FLOW=legacy.
+#
+# PARALLEL_MODE controls worktree usage in legacy flow:
 #
 #   0 = Sequential (default)
 #       - One branch at a time on main worktree

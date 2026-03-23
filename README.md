@@ -4,29 +4,33 @@
 
 **Autonomous Development Orchestrator for Codex**
 
-BMAD Autopilot is a Python-driven state machine that automates the development cycle from epic selection to PR merge. It uses Codex for implementation, QA automation, code review, fix-up, and retrospectives, while GitHub CLI handles PRs, checks, and review state.
+BMAD Autopilot is a Python-driven state machine for unattended story implementation. In the default `story` flow it selects the next story from `_bmad-output/implementation-artifacts/sprint-status.yaml`, runs `bmad-dev-story`, runs QA automation, runs code review, marks the story `done`, and advances to the next story.
+
+The legacy epic/PR flow still exists behind `AUTOPILOT_FLOW=legacy`, but it is not the default.
 
 ## Features
 
-- 🤖 Fully autonomous execution
-- 🔄 Resumable state machine
-- 📋 Multi-epic support with pattern filtering
-- 🧪 Dedicated QA automation phase for integration/E2E tests
-- 🔍 GitHub Copilot review handling and fix-up loops
-- ✅ CI integration and background merge monitoring
-- 🪞 Retrospective generation after merge
-- 📝 Detailed logging in `.autopilot/autopilot.log`
-- 🔀 Parallel mode with worktrees
-- 🔒 Safe config parsing with whitelisted keys
+- Story-first autonomous execution
+- Resumable state machine
+- Start-from selector for skipping ahead to a later story or epic
+- Multi-story filtering
+- QA automation phase for integration/E2E tests
+- Automatic `done` promotion in story status and sprint status after a valid review
+- Detailed logging in `.autopilot/autopilot.log`
+- Legacy PR handling when explicitly enabled
+- Safe config parsing with whitelisted keys
 
 ## Prerequisites
 
-Required tools:
+Story flow:
 
-- `python3` - runs the Python orchestration core
-- `codex` - OpenAI Codex CLI
+- `python3`
+- `codex`
+- `git`
+
+Legacy flow only:
+
 - `gh` - [GitHub CLI](https://cli.github.com/)
-- `git` - Git version control
 
 Optional compatibility:
 
@@ -37,11 +41,19 @@ This checkout is self-contained. The launcher already lives under `.autopilot/`.
 ## Usage
 
 ```bash
-# Process all active epics from _bmad-output/implementation-artifacts/sprint-status.yaml
+# Default story flow
 ./.autopilot/bmad-autopilot.sh
 
-# Process only selected epics
-./.autopilot/bmad-autopilot.sh "1 2 3"
+# Force a specific flow
+AUTOPILOT_FLOW=story ./.autopilot/bmad-autopilot.sh
+AUTOPILOT_FLOW=legacy ./.autopilot/bmad-autopilot.sh
+
+# Filter stories or epics by pattern
+./.autopilot/bmad-autopilot.sh "1-1 1-2 2-1"
+
+# Start from a later story or epic
+./.autopilot/bmad-autopilot.sh --from 3-1
+./.autopilot/bmad-autopilot.sh --from 3.1
 
 # Resume after interruption
 ./.autopilot/bmad-autopilot.sh --continue
@@ -52,33 +64,17 @@ This checkout is self-contained. The launcher already lives under `.autopilot/`.
 
 ## Workflow
 
-The orchestrator runs these phases:
+### Story Flow
+
+`FIND_EPIC -> CREATE_STORY -> DEVELOP_STORIES -> QA_AUTOMATION_TEST -> CODE_REVIEW -> FIND_EPIC`
+
+When code review passes, BMAD Autopilot writes `done` to the story file and to `sprint-status.yaml`, then selects the next story.
+
+### Legacy Flow
 
 `CHECK_PENDING_PR -> FIND_EPIC -> CREATE_BRANCH -> DEVELOP_STORIES -> QA_AUTOMATION_TEST -> CODE_REVIEW -> CREATE_PR`
 
-Background work then monitors PRs:
-
-`WAIT_COPILOT -> FIX_ISSUES -> WAIT_COPILOT -> MERGE_PR -> RETROSPECTIVE -> CHECK_PENDING_PR`
-
-The runner stays alive until the pending PR queue is empty, even after the last new epic has been discovered.
-
-### Phase Summary
-
-| Phase | Description |
-|-------|-------------|
-| `CHECK_PENDING_PR` | Resume unfinished PRs before starting new work |
-| `FIND_EPIC` | Find the next active epic from `_bmad-output/implementation-artifacts/sprint-status.yaml` |
-| `CREATE_BRANCH` | Create `feature/epic-{ID}` |
-| `DEVELOP_STORIES` | Run BMAD dev-story workflow via Codex |
-| `QA_AUTOMATION_TEST` | Add or update automated API/E2E tests, following the integration-test workflow |
-| `CODE_REVIEW` | Run BMAD code-review workflow via Codex |
-| `CREATE_PR` | Create PR, add it to the pending list, continue to the next epic |
-| `WAIT_COPILOT` | Wait for Copilot review and route to fixes if needed |
-| `FIX_ISSUES` | Fix CI/review issues, reply, and resolve threads |
-| `MERGE_PR` | Merge approved PRs and run post-merge checks |
-| `RETROSPECTIVE` | Generate the epic retrospective artifact after merge |
-| `DONE` | All epics processed |
-| `BLOCKED` | Manual intervention required |
+The legacy flow keeps the previous PR, Copilot, and merge handling in place for repositories that still need it.
 
 ### QA Automation Contract
 
@@ -112,6 +108,7 @@ Settings can be provided in this order:
 |----------|---------|-------------|
 | `AUTOPILOT_DEBUG` | `0` | Enable debug logging to `.autopilot/tmp/debug.log` |
 | `AUTOPILOT_VERBOSE` | `0` | Show more progress details in the console |
+| `AUTOPILOT_FLOW` | `auto` | `auto` selects story flow when sprint status has stories; `story` forces story flow; `legacy` keeps the old epic/PR flow |
 | `MAX_TURNS` | `80` | Legacy prompt budget kept for compatibility |
 | `CHECK_INTERVAL` | `30` | Seconds between CI/Copilot checks |
 | `MAX_CHECK_WAIT` | `60` | Max iterations waiting for CI checks |
@@ -125,7 +122,7 @@ Settings can be provided in this order:
 |----------|---------|-------------|
 | `PARALLEL_MODE` | `0` | `0` = sequential, `1+` = use git worktrees |
 | `PARALLEL_CHECK_INTERVAL` | `60` | Seconds between pending PR checks |
-| `MAX_PENDING_PRS` | `2` | Max concurrent PRs before the orchestrator pauses new epic work |
+| `MAX_PENDING_PRS` | `2` | Max concurrent PRs before the legacy orchestrator pauses new epic work |
 
 ## Project Structure
 
@@ -136,8 +133,9 @@ Settings can be provided in this order:
 ├── state.json           # Current state
 ├── autopilot.log        # Execution log
 └── tmp/                 # Temporary files
-    ├── develop-stories-output.txt
-    ├── qa-automation-output.txt
+    ├── create-story-output.txt
+    ├── develop-story-output.txt
+    ├── qa-story-output.txt
     ├── code-review-output.txt
     ├── fix-issues-output.txt
     └── retrospective-output.txt
@@ -145,10 +143,11 @@ Settings can be provided in this order:
 
 ## BMAD Workflows Used
 
+- `$bmad-create-story` - Create the next story when only backlog items remain
 - `$bmad-dev-story` - Story development
 - `$integration-tests-workflow` - QA automation tests
 - `$bmad-code-review` - Code review
-- `$bmad-retrospective` - Epic retrospective
+- `$bmad-retrospective` - Epic retrospective for the legacy flow
 
 ## Troubleshooting
 
@@ -167,8 +166,9 @@ python3 -m json.tool .autopilot/state.json
 ### Common Issues
 
 - `codex` not found: install the Codex CLI and ensure it is on `PATH`
-- `gh` not found: install GitHub CLI and authenticate with `gh auth login`
-- Git tree dirty: commit or stash before starting the runner
+- `gh` not found: only required for `AUTOPILOT_FLOW=legacy`
+- Git tree dirty: story flow will continue, but review the working tree before launching
+- Story never advances to `done`: check `.autopilot/tmp/code-review-output.txt` and the matching story file/sprint status entry
 - PRs not merging: check `.autopilot/tmp/` for the latest `code-review-output.txt`, `fix-issues-output.txt`, or `retrospective-output.txt`
 
 ## Notes
