@@ -69,6 +69,8 @@ AUTOPILOT_FLOW=legacy ./.autopilot/bmad-autopilot.sh
 `FIND_EPIC -> CREATE_STORY -> DEVELOP_STORIES -> QA_AUTOMATION_TEST -> CODE_REVIEW -> FIND_EPIC`
 
 When code review passes, BMAD Autopilot writes `done` to the story file and to `sprint-status.yaml`, then selects the next story.
+If the workspace is dirty at launch, the runner now requires explicit `y`/`yes` confirmation before proceeding.
+Code review evaluates the current workspace snapshot, not only the committed branch diff, and persists review artifacts under that workspace root.
 
 ### Legacy Flow
 
@@ -167,7 +169,7 @@ python3 -m json.tool .autopilot/state.json
 
 - `codex` not found: install the Codex CLI and ensure it is on `PATH`
 - `gh` not found: only required for `AUTOPILOT_FLOW=legacy`
-- Git tree dirty: story flow will continue, but review the working tree before launching
+- Git tree dirty: the launcher prompts for explicit confirmation before continuing
 - Story never advances to `done`: check `.autopilot/tmp/code-review-output.txt` and the matching story file/sprint status entry
 - PRs not merging: check `.autopilot/tmp/` for the latest `code-review-output.txt`, `fix-issues-output.txt`, or `retrospective-output.txt`
 

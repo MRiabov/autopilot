@@ -25,10 +25,10 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from textwrap import dedent
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Literal, Optional, Sequence
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
 class Phase(str, Enum):
@@ -77,6 +77,32 @@ class PausedContext:
 
 
 @dataclass(frozen=True)
+class ReviewSourceSnapshot:
+    current_branch: str
+    branch_diff: str
+    staged_diff: str
+    unstaged_diff: str
+    working_tree_status: str
+    has_reviewable_source: bool
+
+
+@dataclass(frozen=True)
+class ValidationFailure:
+    error_code: str
+    field: str | None
+    message: str
+    expected: str | None = None
+
+
+@dataclass(frozen=True)
+class CodexAttemptResult:
+    return_code: int
+    thread_id: str | None
+    output_text: str
+    validation_failure: ValidationFailure | None = None
+
+
+@dataclass(frozen=True)
 class StoryTarget:
     key: str
     path: Path
@@ -91,6 +117,68 @@ class SprintStatusValue(str, Enum):
     REVIEW = "review"
     OPTIONAL = "optional"
     BLOCKED = "blocked"
+
+
+class StoryDevOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_status: Literal["stories_complete", "stories_blocked"]
+    story_key: str = Field(min_length=1)
+    story_status: Literal["review", "blocked"]
+    blocking_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_story_contract(self) -> StoryDevOutput:
+        if self.workflow_status == "stories_complete":
+            if self.story_status != "review":
+                raise ValueError("story_status must be review when workflow_status is stories_complete")
+            if self.blocking_reason is not None:
+                raise ValueError("blocking_reason must be omitted when workflow_status is stories_complete")
+        elif self.workflow_status == "stories_blocked":
+            if self.story_status != "blocked":
+                raise ValueError("story_status must be blocked when workflow_status is stories_blocked")
+            if not (self.blocking_reason or "").strip():
+                raise ValueError("blocking_reason is required when workflow_status is stories_blocked")
+        return self
+
+
+class EpicDevOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_status: Literal["stories_complete", "stories_blocked"]
+    epic_id: str = Field(min_length=1)
+    story_status: Literal["review", "blocked"]
+    blocking_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_epic_contract(self) -> EpicDevOutput:
+        if self.workflow_status == "stories_complete":
+            if self.story_status != "review":
+                raise ValueError("story_status must be review when workflow_status is stories_complete")
+            if self.blocking_reason is not None:
+                raise ValueError("blocking_reason must be omitted when workflow_status is stories_complete")
+        elif self.workflow_status == "stories_blocked":
+            if self.story_status != "blocked":
+                raise ValueError("story_status must be blocked when workflow_status is stories_blocked")
+            if not (self.blocking_reason or "").strip():
+                raise ValueError("blocking_reason is required when workflow_status is stories_blocked")
+        return self
+
+
+class ReviewDecisionOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    review_status: Literal["pass", "fail"]
+    review_scope_fingerprint: str = Field(min_length=1)
+    reviewed_files: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_review_contract(self) -> ReviewDecisionOutput:
+        if not self.reviewed_files:
+            raise ValueError("reviewed_files must not be empty")
+        if any(not str(path).strip() for path in self.reviewed_files):
+            raise ValueError("reviewed_files entries must be non-empty strings")
+        return self
 
 
 class SprintStatus(BaseModel):
@@ -334,7 +422,12 @@ class AutopilotRunner:
         "review_complete": [(523.25, 0.10), (659.25, 0.10), (783.99, 0.10), (1046.50, 0.14), (1318.51, 0.26)],
     }
     worktree_mirror_paths: tuple[Path, ...] = (
+        Path(".autopilot"),
+        Path(".codex"),
+        Path(".env"),
         Path(".venv"),
+        Path("skills"),
+        Path("suggested_skills"),
         Path("frontend/node_modules"),
         Path("website/node_modules"),
     )
@@ -431,6 +524,90 @@ class AutopilotRunner:
                 return active_root
 
         return self.project_root
+
+    def confirm_dirty_worktree(self, root: Path, *, context: str) -> None:
+        dirty = self.run_text(["git", "status", "--short"], cwd=root, check=False, capture_output=True).strip()
+        if not dirty:
+            return
+
+        self.log("⚠️ WARNING: Git working tree has uncommitted changes")
+        self.log(f"   Context: {context}")
+        self.log(f"   Root: {root}")
+        self.log("   Autopilot will continue only after explicit confirmation.")
+        print("")
+        try:
+            answer = input("Continue anyway? [y/N] ").strip().lower()
+        except EOFError:
+            self.log("Aborted: dirty working tree requires explicit yes/no confirmation.")
+            raise SystemExit(1)
+        if answer not in {"y", "yes"}:
+            self.log("Aborted by user.")
+            raise SystemExit(1)
+        self.log("Continuing with dirty working tree (user confirmed)...")
+
+    def collect_review_source_snapshot(self, repo_root: Path) -> ReviewSourceSnapshot:
+        base_branch = getattr(self, "base_branch", None) or self.detect_base_branch()
+
+        def filter_internal_paths(text: str) -> str:
+            ignored_prefixes = (
+                ".autopilot/tmp/",
+                ".autopilot/state.json",
+                ".autopilot/autopilot.log",
+                "_bmad-outputs/review-artifacts/",
+            )
+            kept_lines = []
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if any(prefix in line for prefix in ignored_prefixes):
+                    continue
+                kept_lines.append(line)
+            return "\n".join(kept_lines)
+
+        current_branch = self.run_text(["git", "branch", "--show-current"], cwd=repo_root, check=False, capture_output=True).strip()
+        branch_diff = filter_internal_paths(
+            self.run_text(
+                ["git", "diff", "--name-only", f"origin/{base_branch}..HEAD"],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+            )
+        )
+        staged_diff = filter_internal_paths(
+            self.run_text(
+                ["git", "diff", "--name-only", "--cached"],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+            )
+        )
+        unstaged_diff = filter_internal_paths(
+            self.run_text(
+                ["git", "diff", "--name-only"],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+            )
+        )
+        working_tree_status = filter_internal_paths(
+            self.run_text(["git", "status", "--short"], cwd=repo_root, check=False, capture_output=True)
+        )
+        working_tree_status = "\n".join(
+            line
+            for line in working_tree_status.splitlines()
+            if not line.startswith("?? .autopilot/")
+            and not line.startswith("?? .autopilot")
+        )
+        has_reviewable_source = bool(branch_diff.strip() or staged_diff.strip() or unstaged_diff.strip())
+        return ReviewSourceSnapshot(
+            current_branch=current_branch,
+            branch_diff=branch_diff,
+            staged_diff=staged_diff,
+            unstaged_diff=unstaged_diff,
+            working_tree_status=working_tree_status,
+            has_reviewable_source=has_reviewable_source,
+        )
 
     def mirror_worktree_support_dirs(self, wt_path: Path) -> None:
         for rel_path in self.worktree_mirror_paths:
@@ -787,25 +964,181 @@ class AutopilotRunner:
         cwd: Path | None = None,
         reasoning_effort: str | None = None,
     ) -> int:
+        return self.run_codex_session(
+            prompt,
+            output_file=output_file,
+            cwd=cwd,
+            reasoning_effort=reasoning_effort,
+        ).return_code
+
+    def run_codex_session(
+        self,
+        prompt: str,
+        output_file: Path | None = None,
+        *,
+        cwd: Path | None = None,
+        reasoning_effort: str | None = None,
+        session_id: str | None = None,
+    ) -> CodexAttemptResult:
         selected_reasoning_effort = reasoning_effort or self.codex_reasoning_effort
         effective_output_file = output_file or (self.tmp_dir / "codex-output.txt")
+        effective_output_file.parent.mkdir(parents=True, exist_ok=True)
+        working_dir = cwd or self.project_root
         self.log(f"🤖 Codex exec (reasoning={selected_reasoning_effort})")
         command = [
             "codex",
             "exec",
+            "--json",
             "-c",
             f"model_reasoning_effort={json.dumps(selected_reasoning_effort)}",
             "--dangerously-bypass-approvals-and-sandbox",
             "--cd",
-            str(cwd or self.project_root),
-            "-",
+            str(working_dir),
+            "-o",
+            str(effective_output_file),
         ]
-        returncode = self.run_streaming_command(command, cwd=cwd or self.project_root, input_text=prompt, output_file=effective_output_file)
+        if session_id:
+            command.extend(["resume", session_id, "-"])
+        else:
+            command.append("-")
+
+        thread_id: str | None = None
+        with subprocess.Popen(
+            command,
+            cwd=str(working_dir),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        ) as proc:
+            assert proc.stdout is not None
+            if proc.stdin is not None:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+
+            while True:
+                line = proc.stdout.readline()
+                if line == "" and proc.poll() is not None:
+                    break
+                if not line:
+                    continue
+                print(line, end="")
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict) and event.get("type") == "thread.started":
+                    event_thread_id = event.get("thread_id")
+                    if isinstance(event_thread_id, str) and event_thread_id.strip():
+                        thread_id = event_thread_id.strip()
+
+            returncode = proc.wait()
+
         if returncode != 0:
             output_text = read_text(effective_output_file)
             if self._looks_like_quota_exhaustion(output_text):
                 self.play_sound("quota")
-        return returncode
+            return CodexAttemptResult(return_code=returncode, thread_id=thread_id, output_text=output_text)
+
+        output_text = read_text(effective_output_file)
+        return CodexAttemptResult(return_code=returncode, thread_id=thread_id, output_text=output_text)
+
+    def run_codex_session_with_retry(
+        self,
+        *,
+        initial_prompt: str,
+        output_file: Path | None = None,
+        cwd: Path | None = None,
+        reasoning_effort: str | None = None,
+        max_attempts: int = 2,
+        phase_name: str,
+        contract: str,
+        validator: Callable[[str], ValidationFailure | None],
+    ) -> CodexAttemptResult:
+        current_prompt = initial_prompt
+        session_id: str | None = None
+        last_result: CodexAttemptResult | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            result = self.run_codex_session(
+                current_prompt,
+                output_file=output_file,
+                cwd=cwd,
+                reasoning_effort=reasoning_effort,
+                session_id=session_id,
+            )
+            if result.thread_id:
+                session_id = result.thread_id
+
+            last_result = result
+            if result.return_code != 0:
+                return result
+
+            failure = validator(result.output_text)
+            if failure is None:
+                return result
+
+            last_result = CodexAttemptResult(
+                return_code=result.return_code,
+                thread_id=result.thread_id,
+                output_text=result.output_text,
+                validation_failure=failure,
+            )
+
+            if attempt >= max_attempts:
+                return last_result
+            if not session_id:
+                return CodexAttemptResult(
+                    return_code=1,
+                    thread_id=None,
+                    output_text=result.output_text,
+                    validation_failure=ValidationFailure(
+                        error_code="missing_session_id",
+                        field="thread_id",
+                        message=f"{phase_name} retry requested but Codex did not emit a resumable session id",
+                        expected="a resumable thread_id from codex exec --json",
+                    ),
+                )
+
+            current_prompt = self.build_retry_prompt(
+                phase_name=phase_name,
+                attempt=attempt + 1,
+                max_attempts=max_attempts,
+                failure=failure,
+                previous_output=result.output_text,
+                contract=contract,
+            )
+
+        assert last_result is not None
+        return last_result
+
+    def build_retry_prompt(
+        self,
+        *,
+        phase_name: str,
+        attempt: int,
+        max_attempts: int,
+        failure: ValidationFailure,
+        previous_output: str,
+        contract: str,
+    ) -> str:
+        failure_yaml = yaml.safe_dump(to_jsonable(failure), sort_keys=False).strip()
+        previous_output = previous_output.strip() or "(empty)"
+        return dedent(
+            f"""
+            Retry attempt {attempt} of {max_attempts} for {phase_name}.
+
+            Validation failure:
+            {failure_yaml}
+
+            Previous output:
+            {previous_output}
+
+            Fix only the structured output contract for the same task and workspace context.
+            {contract}
+            """
+        ).strip() + "\n"
 
     # ------------------------------------------------------------------
     # State management
@@ -1383,9 +1716,11 @@ class AutopilotRunner:
         story_files: list[Path],
         *,
         sprint_status_file: Path,
+        workspace_root: Path | None = None,
     ) -> str:
+        workspace_root = workspace_root or self.project_root
         story_context = "\n".join(f"- {path}" for path in story_files)
-        review_context = self.latest_review_artifact_prompt()
+        review_context = self.latest_review_artifact_prompt(root=workspace_root)
         parts = [
             "$bmad-dev-story",
             "",
@@ -1397,7 +1732,22 @@ class AutopilotRunner:
         ]
         if review_context:
             parts.extend(["", review_context])
-        return "\n".join(parts).strip() + "\n"
+        return dedent(
+            "\n".join(parts)
+            + """
+
+            Output contract:
+            - Return YAML frontmatter only.
+            - Required fields:
+              - workflow_status: stories_complete | stories_blocked
+              - story_key: the exact story key above
+              - story_status: review | blocked
+              - blocking_reason: required only when workflow_status is stories_blocked
+            - If implementation is complete, set workflow_status: stories_complete and story_status: review.
+            - If blocked, set workflow_status: stories_blocked, story_status: blocked, and include blocking_reason.
+            - Do not emit STATUS markers.
+            """
+        ).strip() + "\n"
 
     def build_story_create_prompt(self, story_key: str, story_path: Path) -> str:
         return dedent(
@@ -1409,11 +1759,21 @@ class AutopilotRunner:
             - Story file: {story_path}
 
             Create or refresh exactly this story. Do not select a different backlog item.
+            Keep the story scoped to this one backlog item and preserve the expected story file structure.
+            When finished, leave the story ready for the next dev pass and do not alter unrelated stories.
             """
         ).strip() + "\n"
 
-    def build_story_dev_prompt(self, story_key: str, story_path: Path, sprint_status_file: Path) -> str:
-        review_context = self.latest_review_artifact_prompt()
+    def build_story_dev_prompt(
+        self,
+        story_key: str,
+        story_path: Path,
+        sprint_status_file: Path,
+        *,
+        workspace_root: Path | None = None,
+    ) -> str:
+        workspace_root = workspace_root or self.project_root
+        review_context = self.latest_review_artifact_prompt(root=workspace_root)
         parts = [
             "$bmad-dev-story",
             "",
@@ -1426,7 +1786,21 @@ class AutopilotRunner:
             parts.extend(["", review_context])
         return dedent(
             "\n".join(parts)
-            + "\n\nUse the explicit story file above. Do not switch to a different story."
+            + """
+
+            Output contract:
+            - Return YAML frontmatter only.
+            - Required fields:
+              - workflow_status: stories_complete | stories_blocked
+              - epic_id: the exact epic id above
+              - story_status: review | blocked
+              - blocking_reason: required only when workflow_status is stories_blocked
+            - If implementation is complete, set workflow_status: stories_complete and story_status: review.
+            - If blocked, set workflow_status: stories_blocked, story_status: blocked, and include blocking_reason.
+            - Do not emit STATUS markers.
+
+            Use the explicit story file above. Do not switch to a different story.
+            """
         ).strip() + "\n"
 
     def build_story_qa_prompt(self, story_key: str, story_path: Path) -> str:
@@ -1444,18 +1818,26 @@ class AutopilotRunner:
             - Story file: {story_path}
 
             Focus on the automated validation that supports this story and its acceptance criteria.
+            Output contract:
+            - Return YAML frontmatter only.
+            - Required fields:
+              - review_status: pass | fail
+            - Use review_status: pass when QA succeeds.
+            - Use review_status: fail when QA is blocked or acceptance criteria fail.
+            - Keep the review notes after the frontmatter.
+            - Report deterministic failures only.
             """
         ).strip() + "\n"
 
-    def build_story_code_review_prompt(self, story_key: str, story_path: Path) -> str:
-        current_branch = self.run_text(["git", "branch", "--show-current"], cwd=self.project_root, check=False, capture_output=True).strip()
-        branch_diff = self.run_text(
-            ["git", "diff", "--name-only", f"origin/{self.base_branch}..HEAD"],
-            cwd=self.project_root,
-            check=False,
-            capture_output=True,
-        ).strip()
-        working_tree = self.run_text(["git", "status", "--short"], cwd=self.project_root, check=False, capture_output=True).strip()
+    def build_story_code_review_prompt(
+        self,
+        story_key: str,
+        story_path: Path,
+        *,
+        workspace_root: Path | None = None,
+    ) -> str:
+        workspace_root = workspace_root or self.project_root
+        source = self.collect_review_source_snapshot(workspace_root)
         return dedent(
             f"""
             $bmad-code-review
@@ -1463,18 +1845,40 @@ class AutopilotRunner:
             Review target:
             - Story: {story_key}
             - Story file: {story_path}
-            - Branch: {current_branch or 'detached'}
+            - Branch: {source.current_branch or 'detached'}
             - Base branch: origin/{self.base_branch}
-            - Source: branch diff vs origin/{self.base_branch}
+            - Source: current workspace snapshot (committed diff + working tree diff)
 
-            Changed files:
-            {branch_diff or "(none)"}
+            Committed branch diff:
+            {source.branch_diff or "(none)"}
+
+            Staged diff:
+            {source.staged_diff or "(none)"}
+
+            Unstaged diff:
+            {source.unstaged_diff or "(none)"}
 
             Working tree status:
-            {working_tree or "(clean)"}
+            {source.working_tree_status or "(clean)"}
 
-            Review the branch diff first. If the tree is clean, review the latest commits on the branch.
-            Do not ask for a diff source; use the context above.
+            Reviewability:
+            - Reviewable source present: {"yes" if source.has_reviewable_source else "no"}
+            - If reviewable source is no, fail closed and do not emit pass.
+            - Review scope fingerprint: {self.review_scope_fingerprint(source)}
+
+            Review the current workspace snapshot first. Do not ignore uncommitted changes.
+            If no reviewable source exists, fail closed instead of approving an empty review scope.
+            Output contract:
+            - Return YAML frontmatter only.
+            - Required fields:
+              - review_status: pass | fail
+              - review_scope_fingerprint: must exactly match the fingerprint above
+              - reviewed_files: list of reviewed file paths relative to the repository root
+            - Use review_status: pass when the review is clean.
+            - Use review_status: fail when actionable findings remain.
+            - Keep the review notes after the frontmatter.
+            - Do not emit STATUS markers.
+            - The review artifact will be persisted automatically; use it to preserve findings and verdict.
             """
         ).strip() + "\n"
 
@@ -1503,14 +1907,21 @@ class AutopilotRunner:
             {story_context or "  - (none)"}
 
             Run the relevant integration coverage for this epic and report exact deterministic failures.
+            Output contract:
+            - Return YAML frontmatter only.
+            - Required fields:
+              - review_status: pass | fail
+            - Use review_status: pass when QA succeeds.
+            - Use review_status: fail when QA is blocked or acceptance criteria fail.
+            - Keep the review notes after the frontmatter.
             """
         ).strip() + "\n"
 
-    def review_artifacts_dir(self) -> Path:
-        return self.project_root / "_bmad-outputs" / "review-artifacts"
+    def review_artifacts_dir(self, root: Path | None = None) -> Path:
+        return (root or self.project_root) / "_bmad-outputs" / "review-artifacts"
 
-    def next_review_round(self, review_type: str) -> int:
-        review_dir = self.review_artifacts_dir()
+    def next_review_round(self, review_type: str, *, root: Path | None = None) -> int:
+        review_dir = self.review_artifacts_dir(root)
         pattern = re.compile(rf"^{re.escape(review_type)}-round-(\d+)\.md$")
         highest_round = 0
         if review_dir.exists():
@@ -1520,8 +1931,8 @@ class AutopilotRunner:
                     highest_round = max(highest_round, int(match.group(1)))
         return highest_round + 1
 
-    def latest_review_artifacts(self) -> dict[str, Path]:
-        review_dir = self.review_artifacts_dir()
+    def latest_review_artifacts(self, *, root: Path | None = None) -> dict[str, Path]:
+        review_dir = self.review_artifacts_dir(root)
         latest: dict[str, tuple[int, Path]] = {}
         if not review_dir.exists():
             return {}
@@ -1537,8 +1948,8 @@ class AutopilotRunner:
                     latest[review_type] = (round_number, path)
         return {review_type: path for review_type, (_round_number, path) in latest.items()}
 
-    def latest_review_artifact_prompt(self) -> str:
-        latest = self.latest_review_artifacts()
+    def latest_review_artifact_prompt(self, *, root: Path | None = None) -> str:
+        latest = self.latest_review_artifacts(root=root)
         if not latest:
             return ""
 
@@ -1549,8 +1960,324 @@ class AutopilotRunner:
             path = latest.get(review_type)
             if path:
                 lines.append(f"- {review_type}: {path}")
-        lines.append("Read the latest persisted review files above before making further dev-story changes.")
+        if root:
+            lines.append(f"- Workspace root: {root}")
+        lines.append(
+            "Read the latest persisted review files above before making further dev-story changes; "
+            "they begin with YAML frontmatter containing review_status: pass|fail."
+        )
         return "\n".join(lines)
+
+    def story_file_status(self, story_file: Path) -> str | None:
+        if not story_file.exists():
+            return None
+        match = re.search(r"(?im)^Status:\s*([A-Za-z0-9_-]+)\s*$", read_text(story_file))
+        if not match:
+            return None
+        return match.group(1).strip().lower()
+
+    @staticmethod
+    def output_has_status(output_text: str, status: str) -> bool:
+        return re.search(rf"(?im)^STATUS:\s*{re.escape(status)}\s*$", output_text) is not None
+
+    @staticmethod
+    def parse_yaml_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+        if not text:
+            return {}, text
+
+        normalized = text.lstrip("\ufeff").lstrip()
+        if not normalized.startswith("---"):
+            return {}, text
+
+        lines = normalized.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return {}, text
+
+        end_index = None
+        for index in range(1, len(lines)):
+            if lines[index].strip() == "---":
+                end_index = index
+                break
+
+        if end_index is None:
+            return {}, text
+
+        frontmatter_text = "\n".join(lines[1:end_index]).strip()
+        if not frontmatter_text:
+            return {}, "\n".join(lines[end_index + 1 :])
+
+        try:
+            frontmatter = yaml.safe_load(frontmatter_text) or {}
+        except yaml.YAMLError:
+            return {}, text
+
+        if not isinstance(frontmatter, dict):
+            return {}, text
+
+        body = "\n".join(lines[end_index + 1 :])
+        return frontmatter, body
+
+    def review_status_from_output(self, output_text: str) -> str | None:
+        frontmatter, _body = self.parse_yaml_frontmatter(output_text)
+        value = frontmatter.get("review_status")
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"pass", "fail"}:
+                return normalized
+        return None
+
+    def review_status_from_artifact(self, review_type: str, *, root: Path | None = None) -> str | None:
+        path = self.latest_review_artifacts(root=root).get(review_type)
+        if not path or not path.exists():
+            return None
+        return self.review_status_from_output(read_text(path))
+
+    def review_status_for_output(self, output_text: str, *, return_code: int, status_hint: str | None = None) -> str:
+        explicit = self.review_status_from_output(output_text)
+        if explicit == "pass" and return_code == 0:
+            return "pass"
+        return "fail"
+
+    def review_artifact_text(self, review_type: str, *, root: Path | None = None) -> str:
+        path = self.latest_review_artifacts(root=root).get(review_type)
+        return read_text(path) if path else ""
+
+    @staticmethod
+    def validation_failure_from_exception(
+        exc: Exception,
+        *,
+        default_error_code: str,
+        default_field: str | None,
+        expected: str | None = None,
+    ) -> ValidationFailure:
+        error_code = default_error_code
+        field = default_field
+        message = str(exc).strip() or default_error_code
+
+        if isinstance(exc, ValidationError):
+            errors = exc.errors()
+            if errors:
+                first = errors[0]
+                loc = first.get("loc") or ()
+                if loc:
+                    field = ".".join(str(part) for part in loc)
+                message = str(first.get("msg") or message).strip() or message
+                error_type = first.get("type")
+                if isinstance(error_type, str) and error_type.strip():
+                    error_code = error_type.strip()
+
+        return ValidationFailure(error_code=error_code, field=field, message=message, expected=expected)
+
+    @staticmethod
+    def review_scope_file_names(text: str) -> list[str]:
+        files: set[str] = set()
+        for line in text.splitlines():
+            name = line.strip()
+            if name:
+                files.add(name)
+        return sorted(files)
+
+    def review_scope_fingerprint(self, source: ReviewSourceSnapshot) -> str:
+        payload = {
+            "current_branch": source.current_branch,
+            "branch_diff": self.review_scope_file_names(source.branch_diff),
+            "staged_diff": self.review_scope_file_names(source.staged_diff),
+            "unstaged_diff": self.review_scope_file_names(source.unstaged_diff),
+            "working_tree_status": source.working_tree_status.splitlines(),
+        }
+        payload_text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+
+    def parse_story_dev_output(
+        self,
+        output_text: str,
+        *,
+        expected_story_key: str,
+    ) -> tuple[StoryDevOutput | None, ValidationFailure | None]:
+        frontmatter, _body = self.parse_yaml_frontmatter(output_text)
+        if not frontmatter:
+            return None, ValidationFailure(
+                error_code="missing_frontmatter",
+                field="frontmatter",
+                message="missing YAML frontmatter",
+                expected="workflow_status, story_key, story_status, blocking_reason?",
+            )
+        try:
+            parsed = StoryDevOutput.model_validate(frontmatter)
+        except ValidationError as exc:
+            return None, self.validation_failure_from_exception(
+                exc,
+                default_error_code="invalid_story_output",
+                default_field="frontmatter",
+                expected="workflow_status, story_key, story_status, blocking_reason?",
+            )
+        if parsed.story_key != expected_story_key:
+            return None, ValidationFailure(
+                error_code="mismatched_story_key",
+                field="story_key",
+                message=f"expected story_key {expected_story_key}, got {parsed.story_key}",
+                expected=expected_story_key,
+            )
+        return parsed, None
+
+    def parse_epic_dev_output(
+        self,
+        output_text: str,
+        *,
+        expected_epic_id: str,
+    ) -> tuple[EpicDevOutput | None, ValidationFailure | None]:
+        frontmatter, _body = self.parse_yaml_frontmatter(output_text)
+        if not frontmatter:
+            return None, ValidationFailure(
+                error_code="missing_frontmatter",
+                field="frontmatter",
+                message="missing YAML frontmatter",
+                expected="workflow_status, epic_id, story_status, blocking_reason?",
+            )
+        try:
+            parsed = EpicDevOutput.model_validate(frontmatter)
+        except ValidationError as exc:
+            return None, self.validation_failure_from_exception(
+                exc,
+                default_error_code="invalid_epic_output",
+                default_field="frontmatter",
+                expected="workflow_status, epic_id, story_status, blocking_reason?",
+            )
+        if parsed.epic_id != expected_epic_id:
+            return None, ValidationFailure(
+                error_code="mismatched_epic_id",
+                field="epic_id",
+                message=f"expected epic_id {expected_epic_id}, got {parsed.epic_id}",
+                expected=expected_epic_id,
+            )
+        return parsed, None
+
+    def parse_review_output(
+        self,
+        output_text: str,
+        *,
+        expected_fingerprint: str,
+        valid_files: set[str],
+    ) -> tuple[ReviewDecisionOutput | None, ValidationFailure | None]:
+        frontmatter, _body = self.parse_yaml_frontmatter(output_text)
+        if not frontmatter:
+            return None, ValidationFailure(
+                error_code="missing_frontmatter",
+                field="frontmatter",
+                message="missing YAML frontmatter",
+                expected="review_status, review_scope_fingerprint, reviewed_files",
+            )
+        try:
+            parsed = ReviewDecisionOutput.model_validate(frontmatter)
+        except ValidationError as exc:
+            return None, self.validation_failure_from_exception(
+                exc,
+                default_error_code="invalid_review_output",
+                default_field="frontmatter",
+                expected="review_status, review_scope_fingerprint, reviewed_files",
+            )
+        if parsed.review_scope_fingerprint != expected_fingerprint:
+            return None, ValidationFailure(
+                error_code="mismatched_review_scope_fingerprint",
+                field="review_scope_fingerprint",
+                message="review_scope_fingerprint does not match the current workspace snapshot",
+                expected=expected_fingerprint,
+            )
+        invalid_files = [path for path in parsed.reviewed_files if path not in valid_files]
+        if invalid_files:
+            return None, ValidationFailure(
+                error_code="invalid_reviewed_files",
+                field="reviewed_files",
+                message=f"reviewed_files contains paths outside the review scope: {', '.join(invalid_files)}",
+                expected="subset of the current workspace snapshot files",
+            )
+        return parsed, None
+
+    def validate_review_output(
+        self,
+        output_text: str,
+        *,
+        expected_fingerprint: str,
+        valid_files: set[str],
+    ) -> ValidationFailure | None:
+        _parsed, failure = self.parse_review_output(
+            output_text,
+            expected_fingerprint=expected_fingerprint,
+            valid_files=valid_files,
+        )
+        return failure
+
+    def validate_story_progress(
+        self,
+        *,
+        output_text: str,
+        expected_story_key: str,
+        story_path: Path,
+        sprint_status_root: Path,
+    ) -> ValidationFailure | None:
+        parsed, failure = self.parse_story_dev_output(output_text, expected_story_key=expected_story_key)
+        if failure:
+            return failure
+        assert parsed is not None
+
+        story_status = self.story_file_status(story_path)
+        sprint_status = self.load_sprint_status(root=sprint_status_root)
+        actual_story_status = dict(sprint_status.story_entries()).get(expected_story_key)
+
+        if parsed.workflow_status == "stories_complete":
+            if story_status not in {"review", "done"}:
+                return ValidationFailure(
+                    error_code="story_status_not_review",
+                    field="story_file.Status",
+                    message=f"expected story file status review, got {story_status or 'missing'}",
+                    expected="review",
+                )
+            if actual_story_status != SprintStatusValue.REVIEW:
+                return ValidationFailure(
+                    error_code="sprint_status_not_review",
+                    field=f"development_status.{expected_story_key}",
+                    message=f"expected sprint-status entry {expected_story_key} to be review, got {actual_story_status.value if actual_story_status else 'missing'}",
+                    expected=SprintStatusValue.REVIEW.value,
+                )
+        else:
+            if story_status != "blocked":
+                return ValidationFailure(
+                    error_code="story_status_not_blocked",
+                    field="story_file.Status",
+                    message=f"expected story file status blocked, got {story_status or 'missing'}",
+                    expected="blocked",
+                )
+            if actual_story_status != SprintStatusValue.BLOCKED:
+                return ValidationFailure(
+                    error_code="sprint_status_not_blocked",
+                    field=f"development_status.{expected_story_key}",
+                    message=f"expected sprint-status entry {expected_story_key} to be blocked, got {actual_story_status.value if actual_story_status else 'missing'}",
+                    expected=SprintStatusValue.BLOCKED.value,
+                )
+        return None
+
+    def validate_epic_progress(
+        self,
+        *,
+        output_text: str,
+        expected_epic_id: str,
+        story_files: list[Path],
+    ) -> ValidationFailure | None:
+        parsed, failure = self.parse_epic_dev_output(output_text, expected_epic_id=expected_epic_id)
+        if failure:
+            return failure
+        assert parsed is not None
+
+        story_statuses = [self.story_file_status(path) for path in story_files]
+        if parsed.workflow_status == "stories_complete":
+            if any(status not in {"review", "done"} for status in story_statuses):
+                return ValidationFailure(
+                    error_code="story_files_not_review",
+                    field="story_files",
+                    message="all story files must be marked review or done after a complete dev pass",
+                    expected="each story file status review or done",
+                )
+        return None
 
     def persist_review_artifact(
         self,
@@ -1562,12 +2289,19 @@ class AutopilotRunner:
         output_text: str,
         context_lines: list[str],
         status_hint: str | None = None,
+        root: Path | None = None,
     ) -> Path:
-        round_number = self.next_review_round(review_type)
-        artifact_path = self.review_artifacts_dir() / f"{review_type}-round-{round_number}.md"
+        round_number = self.next_review_round(review_type, root=root)
+        artifact_path = self.review_artifacts_dir(root) / f"{review_type}-round-{round_number}.md"
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
 
+        persisted_review_status = self.review_status_for_output(output_text, return_code=return_code, status_hint=status_hint)
+
         lines = [
+            "---",
+            f"review_status: {persisted_review_status}",
+            "---",
+            "",
             f"# {review_type.replace('-', ' ').title()} Round {round_number}",
             "",
             f"- Timestamp: {utc_now()}",
@@ -1595,32 +2329,46 @@ class AutopilotRunner:
 
     def build_code_review_prompt(self, epic_id: str, *, repo_root: Path | None = None) -> str:
         repo_root = repo_root or self.project_root
-        current_branch = self.run_text(["git", "branch", "--show-current"], cwd=repo_root, check=False, capture_output=True).strip()
-        branch_diff = self.run_text(
-            ["git", "diff", "--name-only", f"origin/{self.base_branch}..HEAD"],
-            cwd=repo_root,
-            check=False,
-            capture_output=True,
-        ).strip()
-        working_tree = self.run_text(["git", "status", "--short"], cwd=repo_root, check=False, capture_output=True).strip()
+        source = self.collect_review_source_snapshot(repo_root)
         return dedent(
             f"""
             $bmad-code-review
 
             Review target:
             - Epic: {epic_id}
-            - Branch: {current_branch or f'feature/epic-{epic_id}'}
+            - Branch: {source.current_branch or f'feature/epic-{epic_id}'}
             - Base branch: origin/{self.base_branch}
-            - Source: branch diff vs origin/{self.base_branch}
+            - Source: current workspace snapshot (committed diff + working tree diff)
 
-            Changed files:
-            {branch_diff or "(none)"}
+            Committed branch diff:
+            {source.branch_diff or "(none)"}
+
+            Staged diff:
+            {source.staged_diff or "(none)"}
+
+            Unstaged diff:
+            {source.unstaged_diff or "(none)"}
 
             Working tree status:
-            {working_tree or "(clean)"}
+            {source.working_tree_status or "(clean)"}
 
-            Review the branch diff first. If the tree is clean, review the latest commits on the branch.
-            Do not ask for a diff source; use the context above.
+            Reviewability:
+            - Reviewable source present: {"yes" if source.has_reviewable_source else "no"}
+            - If reviewable source is no, fail closed and do not emit pass.
+            - Review scope fingerprint: {self.review_scope_fingerprint(source)}
+
+            Review the current workspace snapshot first. Do not ignore uncommitted changes.
+            If no reviewable source exists, fail closed instead of approving an empty review scope.
+            Output contract:
+            - Return YAML frontmatter only.
+            - Required fields:
+              - review_status: pass | fail
+              - review_scope_fingerprint: must exactly match the fingerprint above
+              - reviewed_files: list of reviewed file paths relative to the repository root
+            - Use review_status: pass when the review is clean.
+            - Use review_status: fail when actionable findings remain.
+            - Keep the review notes after the frontmatter.
+            - Do not emit STATUS markers.
             """
         ).strip() + "\n"
 
@@ -1675,15 +2423,20 @@ class AutopilotRunner:
             raise ValueError(f"Could not find Status line in story file: {story_file}")
         write_text(story_file, updated)
 
-    def update_sprint_status_story_done(self, story_key: str) -> None:
+    def update_sprint_status_story_status(self, story_key: str, new_status: SprintStatusValue | str) -> None:
         if not self.sprint_status_file.exists():
             raise ValueError(f"Missing sprint status file: {self.sprint_status_file}")
+
+        if isinstance(new_status, SprintStatusValue):
+            status_value = new_status.value
+        else:
+            status_value = str(new_status)
 
         raw = read_text(self.sprint_status_file)
         now = utc_now()
         updated, count = re.subn(
             rf"^(\s*{re.escape(story_key)}:\s*)([A-Za-z0-9_-]+)\s*$",
-            rf"\1done",
+            rf"\1{status_value}",
             raw,
             count=1,
             flags=re.MULTILINE,
@@ -1695,9 +2448,17 @@ class AutopilotRunner:
         updated = re.sub(r"^last_updated: .*$", f"last_updated: {now}", updated, count=1, flags=re.MULTILINE)
         write_text(self.sprint_status_file, updated)
 
+    def mark_story_review(self, story_key: str, story_path: Path) -> None:
+        self.update_story_file_status(story_path, "review")
+        self.update_sprint_status_story_status(story_key, SprintStatusValue.REVIEW)
+
+    def mark_story_in_progress(self, story_key: str, story_path: Path) -> None:
+        self.update_story_file_status(story_path, "in-progress")
+        self.update_sprint_status_story_status(story_key, SprintStatusValue.IN_PROGRESS)
+
     def mark_story_done(self, story_key: str, story_path: Path) -> None:
         self.update_story_file_status(story_path, "done")
-        self.update_sprint_status_story_done(story_key)
+        self.update_sprint_status_story_status(story_key, SprintStatusValue.DONE)
 
     def build_fix_issues_prompt(self, issues: str) -> str:
         return dedent(
@@ -1802,6 +2563,7 @@ class AutopilotRunner:
             self.state_set_story(Phase.CREATE_STORY, target.key, target.path)
             return
         if target.status in {SprintStatusValue.READY_FOR_DEV, SprintStatusValue.IN_PROGRESS}:
+            self.mark_story_in_progress(target.key, target.path)
             self.state_set_story(Phase.DEVELOP_STORIES, target.key, target.path)
             return
         if target.status == SprintStatusValue.REVIEW:
@@ -1879,23 +2641,63 @@ class AutopilotRunner:
             self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
             return
 
-        self.log(f"📄 Sprint status source: {sprint_status_file}")
+        self.log(f"📄 Sprint status source: {self.sprint_status_file}")
         self.log(f"📄 Story context: {story_path}")
 
         output_file = self.tmp_dir / "develop-story-output.txt"
-        return_code = self.run_codex_exec(
-            self.build_story_dev_prompt(story_key, story_path, self.sprint_status_file),
-            output_file,
+        result = self.run_codex_session_with_retry(
+            initial_prompt=self.build_story_dev_prompt(
+                story_key,
+                story_path,
+                self.sprint_status_file,
+                workspace_root=self.project_root,
+            ),
+            output_file=output_file,
             cwd=self.project_root,
+            reasoning_effort=self.codex_reasoning_effort,
+            max_attempts=2,
+            phase_name="story-development",
+            contract=dedent(
+                """
+                Return YAML frontmatter only with:
+                - workflow_status: stories_complete | stories_blocked
+                - story_key: exact story key
+                - story_status: review | blocked
+                - blocking_reason: required only when blocked
+                """
+            ).strip(),
+            validator=lambda output_text: self.validate_story_progress(
+                output_text=output_text,
+                expected_story_key=story_key,
+                story_path=story_path,
+                sprint_status_root=self.project_root,
+            ),
         )
-        output_text = read_text(output_file)
-        if return_code != 0 or "STATUS: STORIES_BLOCKED" in output_text:
+        output_text = result.output_text
+        if result.return_code != 0:
+            self.log("❌ Codex reported story development failed")
+            if result.validation_failure:
+                self.log(f"   Validation error: {to_jsonable(result.validation_failure)}")
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
+
+        parsed_output, validation_failure = self.parse_story_dev_output(output_text, expected_story_key=story_key)
+        if validation_failure or not parsed_output:
+            self.log("❌ Codex did not produce a valid story-development response")
+            if validation_failure:
+                self.log(f"   Validation error: {to_jsonable(validation_failure)}")
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
+
+        if parsed_output.workflow_status == "stories_blocked":
             self.log("❌ Codex reported story development blocked")
             self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
             return
 
-        if "STATUS: STORIES_COMPLETE" not in output_text:
-            self.log("⚠️ Codex did not report STORIES_COMPLETE; continuing cautiously")
+        if parsed_output.workflow_status != "stories_complete":
+            self.log("❌ Codex did not report stories_complete")
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
 
         self.log("Running local checks gate...")
         try:
@@ -1903,6 +2705,7 @@ class AutopilotRunner:
         except Exception as exc:
             self.log(f"⚠️ Local checks failed after story development: {exc}")
 
+        self.mark_story_review(story_key, story_path)
         self.state_set_story(Phase.COMMIT_SPLIT, story_key, story_path)
         self.log("✅ Story implementation complete; running commit split workflow next")
 
@@ -1931,12 +2734,35 @@ class AutopilotRunner:
             self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
             return
 
-        self.log(f"📄 Sprint status source: {sprint_status_file}")
+        self.log(f"📄 Sprint status source: {self.sprint_status_file}")
         self.log(f"📄 Story context: {story_path}")
 
         output_file = self.tmp_dir / "qa-story-output.txt"
-        return_code = self.run_codex_exec(self.build_story_qa_prompt(story_key, story_path), output_file, cwd=self.project_root)
-        output_text = read_text(output_file)
+        result = self.run_codex_session_with_retry(
+            initial_prompt=self.build_story_qa_prompt(story_key, story_path),
+            output_file=output_file,
+            cwd=self.project_root,
+            reasoning_effort=self.codex_reasoning_effort,
+            max_attempts=2,
+            phase_name="story-qa",
+            contract=dedent(
+                """
+                Return YAML frontmatter only with:
+                - review_status: pass | fail
+                """
+            ).strip(),
+            validator=lambda output_text: None
+            if self.review_status_from_output(output_text) in {"pass", "fail"}
+            else ValidationFailure(
+                error_code="missing_review_status",
+                field="frontmatter.review_status",
+                message="missing YAML frontmatter review_status",
+                expected="review_status: pass | fail",
+            ),
+        )
+        output_text = result.output_text
+        return_code = result.return_code
+        review_status = self.review_status_from_output(output_text)
         self.persist_review_artifact(
             "qa-review",
             phase_name=Phase.QA_AUTOMATION_TEST.value,
@@ -1948,14 +2774,18 @@ class AutopilotRunner:
                 f"Story file: {story_path}",
                 f"Sprint status: {self.sprint_status_file}",
             ],
-            status_hint="STATUS: QA_BLOCKED" if "STATUS: QA_BLOCKED" in output_text else ("STATUS: QA_COMPLETE" if "STATUS: QA_COMPLETE" in output_text else None),
+            status_hint=None,
+            root=self.project_root,
         )
-        if return_code != 0 or "STATUS: QA_BLOCKED" in output_text:
+        if result.validation_failure:
+            self.log("❌ Codex reported QA validation blocked")
+            self.log(f"   Validation error: {to_jsonable(result.validation_failure)}")
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
+        if review_status != "pass":
             self.log("❌ Codex reported QA blocked")
             self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
             return
-        if "STATUS: QA_COMPLETE" not in output_text:
-            self.log("⚠️ Codex did not report QA_COMPLETE; continuing cautiously")
 
         self.log("Running local checks gate...")
         try:
@@ -1995,9 +2825,77 @@ class AutopilotRunner:
             return
 
         self.log(f"Running BMAD code-review workflow for story {story_key}")
+        source = self.collect_review_source_snapshot(self.project_root)
+        if not source.has_reviewable_source:
+            blocked_text = "No reviewable source found in the current workspace snapshot."
+            self.log(f"❌ {blocked_text}")
+            self.persist_review_artifact(
+                "code-review",
+                phase_name=Phase.CODE_REVIEW.value,
+                source_output=self.tmp_dir / "code-review-output.txt",
+                return_code=1,
+                output_text=blocked_text,
+                context_lines=[
+                    f"Story: {story_key}",
+                    f"Story file: {story_path}",
+                    f"Sprint status: {self.sprint_status_file}",
+                    f"Workspace root: {self.project_root}",
+                ],
+                status_hint="STATUS: CODE_REVIEW_BLOCKED",
+                root=self.project_root,
+            )
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
+
         output_file = self.tmp_dir / "code-review-output.txt"
-        return_code = self.run_codex_exec(self.build_story_code_review_prompt(story_key, story_path), output_file, cwd=self.project_root)
-        output_text = read_text(output_file)
+        expected_fingerprint = self.review_scope_fingerprint(source)
+        valid_files = set(self.review_scope_file_names(source.branch_diff))
+        valid_files.update(self.review_scope_file_names(source.staged_diff))
+        valid_files.update(self.review_scope_file_names(source.unstaged_diff))
+        result = self.run_codex_session_with_retry(
+            initial_prompt=self.build_story_code_review_prompt(
+                story_key,
+                story_path,
+                workspace_root=self.project_root,
+            ),
+            output_file=output_file,
+            cwd=self.project_root,
+            reasoning_effort=self.codex_reasoning_effort,
+            max_attempts=2,
+            phase_name="story-code-review",
+            contract=dedent(
+                """
+                Return YAML frontmatter only with:
+                - review_status: pass | fail
+                - review_scope_fingerprint: exact fingerprint from the prompt
+                - reviewed_files: list of reviewed file paths relative to the repository root
+                """
+            ).strip(),
+            validator=lambda output_text: self.validate_review_output(
+                output_text,
+                expected_fingerprint=expected_fingerprint,
+                valid_files=valid_files,
+            ),
+        )
+        output_text = result.output_text
+        return_code = result.return_code
+        parsed_output, validation_failure = self.parse_review_output(
+            output_text,
+            expected_fingerprint=expected_fingerprint,
+            valid_files=valid_files,
+        )
+        if result.return_code != 0:
+            self.log("❌ Codex reported code review failed")
+            if result.validation_failure:
+                self.log(f"   Validation error: {to_jsonable(result.validation_failure)}")
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
+        if validation_failure or not parsed_output:
+            self.log("❌ Codex did not produce a valid code-review response")
+            if validation_failure:
+                self.log(f"   Validation error: {to_jsonable(validation_failure)}")
+            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            return
         self.persist_review_artifact(
             "code-review",
             phase_name=Phase.CODE_REVIEW.value,
@@ -2008,11 +2906,16 @@ class AutopilotRunner:
                 f"Story: {story_key}",
                 f"Story file: {story_path}",
                 f"Sprint status: {self.sprint_status_file}",
+                f"Workspace root: {self.project_root}",
             ],
-            status_hint="STATUS: CODE_REVIEW_DONE" if "STATUS: CODE_REVIEW_DONE" in output_text else None,
+            status_hint=None,
+            root=self.project_root,
         )
-        if return_code != 0 or "STATUS: CODE_REVIEW_DONE" not in output_text:
-            self.log("⚠️ Codex did not report CODE_REVIEW_DONE cleanly")
+        if parsed_output.review_status != "pass":
+            self.log("❌ Codex reported code review blocked")
+            self.mark_story_in_progress(story_key, story_path)
+            self.state_set_story(Phase.DEVELOP_STORIES, story_key, story_path)
+            return
 
         try:
             self.autopilot_checks()
@@ -2199,19 +3102,58 @@ class AutopilotRunner:
             self.log(f"📄 Story context: {story_file}")
 
         output_file = self.tmp_dir / "develop-stories-output.txt"
-        return_code = self.run_codex_exec(
-            self.build_dev_story_prompt(epic_id, sprint_status, story_files, sprint_status_file=sprint_status_file),
-            output_file,
+        result = self.run_codex_session_with_retry(
+            initial_prompt=self.build_dev_story_prompt(
+                epic_id,
+                sprint_status,
+                story_files,
+                sprint_status_file=sprint_status_file,
+                workspace_root=workspace_root,
+            ),
+            output_file=output_file,
             cwd=workspace_root,
             reasoning_effort="high",
+            max_attempts=2,
+            phase_name="epic-development",
+            contract=dedent(
+                """
+                Return YAML frontmatter only with:
+                - workflow_status: stories_complete | stories_blocked
+                - epic_id: exact epic id
+                - story_status: review | blocked
+                - blocking_reason: required only when blocked
+                """
+            ).strip(),
+            validator=lambda output_text: self.validate_epic_progress(
+                output_text=output_text,
+                expected_epic_id=epic_id,
+                story_files=story_files,
+            ),
         )
-        output_text = read_text(output_file)
-        if return_code != 0 or "STATUS: STORIES_BLOCKED" in output_text:
+        output_text = result.output_text
+        if result.return_code != 0:
+            self.log("❌ Codex reported stories blocked")
+            if result.validation_failure:
+                self.log(f"   Validation error: {to_jsonable(result.validation_failure)}")
+            self.state_set(Phase.BLOCKED, epic_id)
+            return
+
+        parsed_output, validation_failure = self.parse_epic_dev_output(output_text, expected_epic_id=epic_id)
+        if validation_failure or not parsed_output:
+            self.log("❌ Codex did not produce a valid stories-development response")
+            if validation_failure:
+                self.log(f"   Validation error: {to_jsonable(validation_failure)}")
+            self.state_set(Phase.BLOCKED, epic_id)
+            return
+
+        if parsed_output.workflow_status == "stories_blocked":
             self.log("❌ Codex reported stories blocked")
             self.state_set(Phase.BLOCKED, epic_id)
             return
-        if "STATUS: STORIES_COMPLETE" not in output_text:
-            self.log("⚠️ Codex did not report STORIES_COMPLETE; continuing cautiously")
+        if parsed_output.workflow_status != "stories_complete":
+            self.log("❌ Codex did not report stories_complete")
+            self.state_set(Phase.BLOCKED, epic_id)
+            return
 
         self.log("Running local checks gate...")
         try:
@@ -2316,12 +3258,31 @@ class AutopilotRunner:
             self.log(f"📄 Story context: {story_file}")
 
         output_file = self.tmp_dir / "qa-automation-output.txt"
-        return_code = self.run_codex_exec(
-            self.build_qa_prompt(epic_id, sprint_status, story_files, repo_root=workspace_root),
-            output_file,
+        result = self.run_codex_session_with_retry(
+            initial_prompt=self.build_qa_prompt(epic_id, sprint_status, story_files, repo_root=workspace_root),
+            output_file=output_file,
             cwd=workspace_root,
+            reasoning_effort=self.codex_reasoning_effort,
+            max_attempts=2,
+            phase_name="epic-qa",
+            contract=dedent(
+                """
+                Return YAML frontmatter only with:
+                - review_status: pass | fail
+                """
+            ).strip(),
+            validator=lambda output_text: None
+            if self.review_status_from_output(output_text) in {"pass", "fail"}
+            else ValidationFailure(
+                error_code="missing_review_status",
+                field="frontmatter.review_status",
+                message="missing YAML frontmatter review_status",
+                expected="review_status: pass | fail",
+            ),
         )
-        output_text = read_text(output_file)
+        output_text = result.output_text
+        return_code = result.return_code
+        review_status = self.review_status_from_output(output_text)
         self.persist_review_artifact(
             "qa-review",
             phase_name=Phase.QA_AUTOMATION_TEST.value,
@@ -2334,14 +3295,18 @@ class AutopilotRunner:
                 "Story files:",
                 *[f"{path}" for path in story_files],
             ],
-            status_hint="STATUS: QA_BLOCKED" if "STATUS: QA_BLOCKED" in output_text else ("STATUS: QA_COMPLETE" if "STATUS: QA_COMPLETE" in output_text else None),
+            status_hint=None,
+            root=workspace_root,
         )
-        if return_code != 0 or "STATUS: QA_BLOCKED" in output_text:
+        if result.validation_failure:
+            self.log("❌ Codex reported QA validation blocked")
+            self.log(f"   Validation error: {to_jsonable(result.validation_failure)}")
+            self.state_set(Phase.BLOCKED, epic_id)
+            return
+        if review_status != "pass":
             self.log("❌ Codex reported QA blocked")
             self.state_set(Phase.BLOCKED, epic_id)
             return
-        if "STATUS: QA_COMPLETE" not in output_text:
-            self.log("⚠️ Codex did not report QA_COMPLETE; continuing cautiously")
 
         self.log("Running local checks gate...")
         try:
@@ -2374,13 +3339,74 @@ class AutopilotRunner:
             return
 
         self.log(f"Running BMAD code-review workflow for epic {epic_id}")
+        source = self.collect_review_source_snapshot(workspace_root)
+        if not source.has_reviewable_source:
+            blocked_text = "No reviewable source found in the current workspace snapshot."
+            self.log(f"❌ {blocked_text}")
+            self.persist_review_artifact(
+                "code-review",
+                phase_name=Phase.CODE_REVIEW.value,
+                source_output=self.tmp_dir / "code-review-output.txt",
+                return_code=1,
+                output_text=blocked_text,
+                context_lines=[
+                    f"Epic: {epic_id}",
+                    f"Base branch: origin/{self.base_branch}",
+                    f"Workspace root: {workspace_root}",
+                    "Story files:",
+                    *[f"{path}" for path in story_files],
+                ],
+                status_hint="STATUS: CODE_REVIEW_BLOCKED",
+                root=workspace_root,
+            )
+            self.state_set(Phase.BLOCKED, epic_id)
+            return
+
         output_file = self.tmp_dir / "code-review-output.txt"
-        return_code = self.run_codex_exec(
-            self.build_code_review_prompt(epic_id, repo_root=workspace_root),
-            output_file,
+        expected_fingerprint = self.review_scope_fingerprint(source)
+        valid_files = set(self.review_scope_file_names(source.branch_diff))
+        valid_files.update(self.review_scope_file_names(source.staged_diff))
+        valid_files.update(self.review_scope_file_names(source.unstaged_diff))
+        result = self.run_codex_session_with_retry(
+            initial_prompt=self.build_code_review_prompt(epic_id, repo_root=workspace_root),
+            output_file=output_file,
             cwd=workspace_root,
+            reasoning_effort=self.codex_reasoning_effort,
+            max_attempts=2,
+            phase_name="epic-code-review",
+            contract=dedent(
+                """
+                Return YAML frontmatter only with:
+                - review_status: pass | fail
+                - review_scope_fingerprint: exact fingerprint from the prompt
+                - reviewed_files: list of reviewed file paths relative to the repository root
+                """
+            ).strip(),
+            validator=lambda output_text: self.validate_review_output(
+                output_text,
+                expected_fingerprint=expected_fingerprint,
+                valid_files=valid_files,
+            ),
         )
-        output_text = read_text(output_file)
+        output_text = result.output_text
+        return_code = result.return_code
+        parsed_output, validation_failure = self.parse_review_output(
+            output_text,
+            expected_fingerprint=expected_fingerprint,
+            valid_files=valid_files,
+        )
+        if result.return_code != 0:
+            self.log("❌ Codex reported code review failed")
+            if result.validation_failure:
+                self.log(f"   Validation error: {to_jsonable(result.validation_failure)}")
+            self.state_set(Phase.BLOCKED, epic_id)
+            return
+        if validation_failure or not parsed_output:
+            self.log("❌ Codex did not produce a valid code-review response")
+            if validation_failure:
+                self.log(f"   Validation error: {to_jsonable(validation_failure)}")
+            self.state_set(Phase.BLOCKED, epic_id)
+            return
         self.persist_review_artifact(
             "code-review",
             phase_name=Phase.CODE_REVIEW.value,
@@ -2390,13 +3416,17 @@ class AutopilotRunner:
             context_lines=[
                 f"Epic: {epic_id}",
                 f"Base branch: origin/{self.base_branch}",
+                f"Workspace root: {workspace_root}",
                 "Story files:",
                 *[f"{path}" for path in story_files],
             ],
-            status_hint="STATUS: CODE_REVIEW_DONE" if "STATUS: CODE_REVIEW_DONE" in output_text else None,
+            status_hint=None,
+            root=workspace_root,
         )
-        if return_code != 0 or "STATUS: CODE_REVIEW_DONE" not in output_text:
+        if parsed_output.review_status != "pass":
             self.log("⚠️ Codex did not report CODE_REVIEW_DONE cleanly")
+            self.state_set(Phase.BLOCKED, epic_id)
+            return
 
         try:
             self.autopilot_checks(workspace_root)
@@ -2799,11 +3829,6 @@ class AutopilotRunner:
             self.log(f"   DEBUG_MODE: {int(self.config.debug_mode)}")
             self.log("")
 
-        dirty = self.run_text(["git", "status", "--porcelain"], cwd=self.project_root, check=False).strip()
-        if dirty:
-            self.log("⚠️ WARNING: Git working tree has uncommitted changes")
-            self.log("   Story flow will continue unattended and may build on those changes.")
-
         if not self.config.epic_pattern:
             self.log("ℹ️ No epic pattern provided - will process active stories from sprint-status.yaml in order")
         if self.config.start_from:
@@ -2833,6 +3858,7 @@ class AutopilotRunner:
 
     def run(self) -> None:
         self.require_tooling()
+        self.confirm_dirty_worktree(self.project_root, context="story flow" if self.is_story_flow() else "legacy flow")
         self.ensure_state_file()
 
         if self.is_story_flow():
@@ -2852,18 +3878,6 @@ class AutopilotRunner:
             self.log(f"   PARALLEL_CHECK_INTERVAL: {self.config.parallel_check_interval}s")
             self.log(f"   DEBUG_MODE: {int(self.config.debug_mode)}")
             self.log("")
-
-        dirty = self.run_text(["git", "status", "--porcelain"], cwd=self.project_root, check=False).strip()
-        if dirty:
-            self.log("⚠️ WARNING: Git working tree has uncommitted changes")
-            self.log("   Autopilot uses /tmp worktrees for branch work, but stale local state can still confuse resumption.")
-            self.log("   Consider committing or stashing your changes first.")
-            print("")
-            answer = input("Continue anyway? [y/N] ").strip().lower()
-            if answer not in {"y", "yes"}:
-                self.log("Aborted by user.")
-                raise SystemExit(1)
-            self.log("Continuing with dirty working tree (user confirmed)...")
 
         if not self.config.epic_pattern:
             self.log("ℹ️ No epic pattern provided - will process ALL active epics from sprint-status.yaml in order")

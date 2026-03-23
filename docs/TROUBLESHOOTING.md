@@ -18,7 +18,8 @@ Legacy flow only:
 
 ### 2. Git working tree not clean
 
-Story flow continues unattended even if the tree is dirty, but you should still review the state before launching.
+The launcher now asks for explicit confirmation before proceeding on a dirty workspace.
+If you want a clean start, commit or stash the pending changes first.
 
 If you want a clean start:
 
@@ -41,7 +42,7 @@ print({k: v for k, v in data['development_status'].items() if v in {'in-progress
 PY
 ```
 
-If the story is still `review`, the next phase should be `code-review`. If the runner is stuck in an old legacy state, delete `.autopilot/state.json` and rerun the launcher.
+If the story is still `review`, the next phase should be `code-review`. If the code-review snapshot has no reviewable source, the launcher will now fail closed instead of approving an empty scope. If the runner is stuck in an old legacy state, delete `.autopilot/state.json` and rerun the launcher.
 
 ### 4. Legacy state file blocks story flow
 

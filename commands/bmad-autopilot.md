@@ -92,7 +92,7 @@ Persist `.autopilot/state.json` after each phase transition.
 
 ## Rules
 
-1. Never ask the user questions.
+1. Do not ask the user questions except for the explicit dirty-worktree confirmation gate.
 2. Commit often.
 3. Continue on errors where possible.
 4. Update state after each phase.
