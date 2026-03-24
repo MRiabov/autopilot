@@ -182,7 +182,7 @@ The important contracts are:
 
 - Dev output returns `workflow_status` plus the correct story or epic identifier.
 - QA output returns `review_status`.
-- Review output returns `review_status`, `review_scope_fingerprint`, and `reviewed_files`.
+- Review output returns `review_status`, `review_scope_fingerprint`, `reviewed_files`, and a freeform Markdown review body with findings/comments that is preserved in the review artifact.
 
 Decision rule:
 

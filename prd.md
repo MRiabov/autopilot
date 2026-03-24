@@ -145,7 +145,7 @@ The product should always feel like an execution engine, not a conversational ag
 - The product validates required fields before state transitions.
 - The product rejects malformed output instead of inferring intent from prose.
 - The product keeps review and dev decisions tied to the current workspace snapshot.
-- The product preserves exact fingerprints and scope checks for review output.
+- The product preserves exact fingerprints and scope checks for review output, and it retains freeform Markdown findings/comments in the persisted review artifact.
 
 ### Session continuity
 
@@ -172,7 +172,7 @@ The product should always feel like an execution engine, not a conversational ag
 ### Observability
 
 - The product logs phase transitions, validation failures, account switches, and retry decisions.
-- The product persists review artifacts and code-review provenance under the active workspace.
+- The product persists review artifacts and code-review provenance under the active workspace, including the markdown findings body when present.
 - The product keeps enough history to explain why a run retried or switched accounts.
 - The product records resumable session IDs when the Codex CLI emits them.
 
