@@ -17,6 +17,7 @@ The legacy epic/PR flow still exists behind `AUTOPILOT_FLOW=legacy`, but it is n
 - QA automation phase for integration/E2E tests
 - Automatic `done` promotion in story status and sprint status after a valid review
 - Detailed logging in `.autopilot/autopilot.log`
+- Last-run summary helper in `.autopilot/scripts/status.sh`
 - Legacy PR handling when explicitly enabled
 - Safe config parsing with whitelisted keys
 
@@ -63,6 +64,9 @@ AUTOPILOT_FLOW=legacy ./.autopilot/bmad-autopilot.sh
 
 # Enable verbose logging
 ./.autopilot/bmad-autopilot.sh --verbose
+
+# Inspect the latest run summary
+./.autopilot/scripts/status.sh
 ```
 
 ## Workflow
@@ -140,6 +144,8 @@ Settings can be provided in this order:
 ├── bmad-autopilot.sh    # Shell launcher
 ├── bmad-autopilot.py        # Thin CLI wrapper
 ├── bmad_autopilot_runner.py  # Python orchestration core
+├── scripts/status.sh     # Last-run summary helper
+├── scripts/status.py     # Thin CLI wrapper for the summary helper
 ├── state.json           # Current state
 ├── autopilot.log        # Execution log
 └── tmp/                 # Temporary files

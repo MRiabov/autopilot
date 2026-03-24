@@ -32,6 +32,7 @@ Supporting modules:
 | [`.autopilot/scripts/internal/models.py`](scripts/internal/models.py) | State models, enums, Pydantic contracts, and runtime dataclasses |
 | [`.autopilot/scripts/internal/utils.py`](scripts/internal/utils.py) | Timestamp, serialization, and text IO helpers |
 | [`.autopilot/scripts/internal/cockpit.py`](scripts/internal/cockpit.py) | Cockpit/Codex account store parsing and account switching |
+| [`.autopilot/scripts/internal/status.py`](scripts/internal/status.py) | Last-run status summarization and log slicing helpers |
 | [`.autopilot/scripts/internal/runner_story_phases.py`](scripts/internal/runner_story_phases.py) | Story-flow phase handlers, reroute behavior, and story-specific orchestration |
 | [`.autopilot/scripts/internal/runner_legacy_phases.py`](scripts/internal/runner_legacy_phases.py) | Legacy epic/PR phase handlers, waiting loops, and backfill support |
 
