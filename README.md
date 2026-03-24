@@ -56,7 +56,10 @@ AUTOPILOT_FLOW=legacy ./.autopilot/bmad-autopilot.sh
 ./.autopilot/bmad-autopilot.sh --from 3.1
 
 # Resume after interruption
-./.autopilot/bmad-autopilot.sh --continue
+./.autopilot/bmad-autopilot.sh
+
+# Force a fresh start
+./.autopilot/bmad-autopilot.sh --no-continue
 
 # Enable verbose logging
 ./.autopilot/bmad-autopilot.sh --verbose
@@ -71,6 +74,8 @@ AUTOPILOT_FLOW=legacy ./.autopilot/bmad-autopilot.sh
 When code review passes, BMAD Autopilot writes `done` to the story file and to `sprint-status.yaml`, then selects the next story.
 If the workspace is dirty at launch, the runner now requires explicit `y`/`yes` confirmation before proceeding.
 Code review evaluates the current workspace snapshot, not only the committed branch diff, and persists review artifacts under that workspace root.
+If a dev pass reports `stories_blocked`, the runner keeps the story `in-progress` and reroutes back to development immediately instead of treating the story as terminally blocked.
+If Codex reports quota exhaustion, the runner switches to a healthier account when possible or waits and retries when no account can be rotated in.
 
 ### Legacy Flow
 
@@ -117,6 +122,7 @@ Settings can be provided in this order:
 | `MAX_COPILOT_WAIT` | `60` | Max iterations waiting for Copilot review |
 | `AUTOPILOT_RUN_MOBILE_NATIVE` | `0` | Set to `1` to run Gradle builds |
 | `AUTOPILOT_BASE_BRANCH` | auto | Override base branch detection |
+| `AUTOPILOT_QUOTA_RETRY_SECONDS` | `1800` | Wait before retrying Codex after quota exhaustion when no healthier account is available |
 
 ### Parallel Mode
 
@@ -131,7 +137,8 @@ Settings can be provided in this order:
 ```
 .autopilot/
 ├── bmad-autopilot.sh    # Shell launcher
-├── bmad-autopilot.py    # Python orchestration core
+├── bmad-autopilot.py        # Thin CLI wrapper
+├── bmad_autopilot_runner.py  # Python orchestration core
 ├── state.json           # Current state
 ├── autopilot.log        # Execution log
 └── tmp/                 # Temporary files
@@ -170,6 +177,7 @@ python3 -m json.tool .autopilot/state.json
 - `codex` not found: install the Codex CLI and ensure it is on `PATH`
 - `gh` not found: only required for `AUTOPILOT_FLOW=legacy`
 - Git tree dirty: the launcher prompts for explicit confirmation before continuing
+- Continuation is on by default; use `--no-continue` only when you want to force a fresh state
 - Story never advances to `done`: check `.autopilot/tmp/code-review-output.txt` and the matching story file/sprint status entry
 - PRs not merging: check `.autopilot/tmp/` for the latest `code-review-output.txt`, `fix-issues-output.txt`, or `retrospective-output.txt`
 

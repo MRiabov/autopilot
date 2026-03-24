@@ -6,7 +6,7 @@ The active runtime is the Codex-backed launcher in `scripts/bmad-autopilot.py`.
 ## What the installer places
 
 1. `.autopilot/bmad-autopilot.sh`
-2. `.autopilot/bmad-autopilot.py`
+2. `.autopilot/scripts/bmad-autopilot.py`
 3. `.autopilot/config.example`
 4. Optional legacy command templates in `.claude/commands` and `.claude/skills`
 

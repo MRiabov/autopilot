@@ -35,6 +35,9 @@
 # Override default branch detection (auto-detected from origin/HEAD, main, or master)
 # AUTOPILOT_BASE_BRANCH=main
 
+# Seconds to wait before retrying Codex after quota exhaustion when no healthier account is available
+# AUTOPILOT_QUOTA_RETRY_SECONDS=1800
+
 # =============================================================================
 # EXECUTION MODE
 # =============================================================================

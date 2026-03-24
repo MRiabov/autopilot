@@ -90,7 +90,7 @@ If a Codex phase finishes without the expected output, inspect the matching file
 - `fix-issues-output.txt`
 - `retrospective-output.txt`
 
-Then rerun the launcher with `--continue`.
+Then rerun the launcher. Continuation is on by default; use `--no-continue` only if you want to force a fresh state.
 
 ### 8. Permission denied on script
 
@@ -111,15 +111,18 @@ tail -f .autopilot/autopilot.log
 
 ```bash
 echo '{"mode":"sequential","phase":"FIND_EPIC","current_epic":null,"current_story":null,"current_story_file":null,"completed_epics":[],"pending_prs":[],"paused_context":null,"active_phase":null,"active_epic":null,"active_worktree":null}' > .autopilot/state.json
-./.autopilot/bmad-autopilot.sh --continue
+./.autopilot/bmad-autopilot.sh
 ```
+
+If `stories_blocked` appears in the log, that is a transient dev-phase reroute signal. The launcher keeps the story in-progress and reroutes back to development immediately instead of persisting a blocked story state.
+If Codex reports quota exhaustion, the launcher will try to switch to a healthier account first. If no account can be rotated in, it waits for `AUTOPILOT_QUOTA_RETRY_SECONDS` and retries.
 
 ### Run individual phases
 
 The Python runner is easiest to inspect by calling it directly:
 
 ```bash
-python3 .autopilot/bmad-autopilot.py --help
+python3 .autopilot/scripts/bmad-autopilot.py --help
 ```
 
 ## Getting Help
