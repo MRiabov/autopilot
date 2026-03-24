@@ -176,7 +176,15 @@ class LegacyPrPhasesMixin:
             self.config.continue_run
             and self.state_file.exists()
             and not self.state.current_story
-            and self.state.phase not in {Phase.FIND_EPIC, Phase.CREATE_STORY, Phase.DEVELOP_STORIES, Phase.QA_AUTOMATION_TEST, Phase.CODE_REVIEW, Phase.DONE}
+            and self.state.phase not in {
+                Phase.FIND_EPIC,
+                Phase.CREATE_STORY,
+                Phase.DEVELOP_STORIES,
+                Phase.QA_AUTOMATION_TEST,
+                Phase.CODE_REVIEW,
+                Phase.EPIC_REVIEW,
+                Phase.DONE,
+            }
         )
         if not self.config.continue_run or not self.state_file.exists() or stale_legacy_state:
             if stale_legacy_state:

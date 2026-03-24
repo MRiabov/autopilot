@@ -4,7 +4,7 @@
 
 **Autonomous Development Orchestrator for Codex**
 
-BMAD Autopilot is a Python-driven state machine for unattended story implementation. In the default `story` flow it selects the next story from `_bmad-output/implementation-artifacts/sprint-status.yaml`, runs `bmad-dev-story`, runs QA automation, runs code review, marks the story `done`, and advances to the next story.
+BMAD Autopilot is a Python-driven state machine for unattended story implementation. In the default `story` flow it selects the next story from `_bmad-output/implementation-artifacts/sprint-status.yaml`, runs `bmad-dev-story`, runs QA automation, runs code review, marks the story `done`, and when all stories are complete it finalizes each epic and runs `bmad-retrospective` before exiting.
 
 The legacy epic/PR flow still exists behind `AUTOPILOT_FLOW=legacy`, but it is not the default.
 
@@ -73,9 +73,9 @@ AUTOPILOT_FLOW=legacy ./.autopilot/bmad-autopilot.sh
 
 ### Story Flow
 
-`FIND_EPIC -> CREATE_STORY -> DEVELOP_STORIES -> QA_AUTOMATION_TEST -> CODE_REVIEW -> FIND_EPIC`
+`FIND_EPIC -> CREATE_STORY -> DEVELOP_STORIES -> QA_AUTOMATION_TEST -> CODE_REVIEW -> EPIC_REVIEW -> FIND_EPIC`
 
-When code review passes, BMAD Autopilot writes `done` to the story file and to `sprint-status.yaml`, then selects the next story.
+When code review passes, BMAD Autopilot writes `done` to the story file and to `sprint-status.yaml`, then selects the next story. Once no active stories remain, it marks each completed epic `done`, runs `bmad-retrospective`, and records the retrospective status in `sprint-status.yaml`.
 If the workspace is dirty at launch, the runner now requires explicit `y`/`yes` confirmation before proceeding.
 Use `--accept-dirty-worktree` if you want to skip that prompt and continue immediately.
 Code review evaluates the current workspace snapshot, not only the committed branch diff, and persists review artifacts under that workspace root.

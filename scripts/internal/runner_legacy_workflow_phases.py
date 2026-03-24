@@ -419,11 +419,13 @@ class LegacyWorkflowPhasesMixin:
                 self.phase_qa_automation_test()
             elif phase == Phase.CODE_REVIEW:
                 self.phase_code_review()
+            elif phase == Phase.EPIC_REVIEW:
+                self.phase_review_epic()
             elif phase == Phase.BLOCKED:
                 self.log("⚠️ BLOCKED - manual intervention needed")
                 raise SystemExit(1)
             elif phase == Phase.DONE:
-                self.log("🎉 ALL STORIES COMPLETED!")
+                self.log("🎉 ALL STORIES AND EPICS COMPLETED!")
                 raise SystemExit(0)
             else:
                 self.log(f"❌ Unknown phase: {phase}")

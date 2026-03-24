@@ -28,7 +28,8 @@ Read `.autopilot/state.json`. If it does not exist, start fresh.
 6. Run `$integration-tests-workflow` for the selected story.
 7. Run `$bmad-code-review` on the selected story.
 8. If the review is valid, mark the story `done` in the story file and in `sprint-status.yaml`.
-9. Return to story selection and continue.
+9. If no active stories remain, review completed epics, mark each epic `done`, run `$bmad-retrospective`, and record the retrospective status.
+10. Return to story selection and continue.
 
 ### Legacy Flow
 1. Resume open `feature/epic-*` PRs before starting new work.

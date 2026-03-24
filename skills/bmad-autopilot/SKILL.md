@@ -26,7 +26,8 @@ The orchestrator defaults to the story-first flow:
 3. `DEVELOP_STORIES`
 4. `QA_AUTOMATION_TEST`
 5. `CODE_REVIEW`
-6. Loop until every story is `done`
+6. `EPIC_REVIEW`
+7. Loop until every story is `done` and each completed epic has been finalized with a retrospective
 
 Legacy epic/PR flow remains available when `AUTOPILOT_FLOW=legacy`:
 

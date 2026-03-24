@@ -7,10 +7,10 @@ BMAD Autopilot is a state-machine orchestrator that now defaults to a story-firs
 The story flow is the default when sprint status contains story rows:
 
 ```text
-FIND_EPIC -> CREATE_STORY -> DEVELOP_STORIES -> QA_AUTOMATION_TEST -> CODE_REVIEW -> FIND_EPIC
+FIND_EPIC -> CREATE_STORY -> DEVELOP_STORIES -> QA_AUTOMATION_TEST -> CODE_REVIEW -> EPIC_REVIEW -> FIND_EPIC
 ```
 
-When code review succeeds, the runner writes `done` back to the story file and to `sprint-status.yaml`, then selects the next story.
+When code review succeeds, the runner writes `done` back to the story file and to `sprint-status.yaml`, then selects the next story. When no active stories remain, the story flow finalizes each completed epic, runs `$bmad-retrospective`, and marks the epic retrospective status in `sprint-status.yaml`.
 
 The legacy epic/PR flow still exists behind `AUTOPILOT_FLOW=legacy`:
 
@@ -80,6 +80,10 @@ Runs the integration-test workflow for the selected story.
 ### CODE_REVIEW
 
 Runs the BMAD code-review workflow. In story flow, a successful review marks the story `done` in both the story file and sprint status.
+
+### EPIC_REVIEW
+
+Runs the BMAD retrospective workflow for a completed epic after all stories are done. The runner marks the epic `done`, writes the retrospective artifact, and records the epic retrospective status in sprint status.
 
 ### Legacy PR Phases
 

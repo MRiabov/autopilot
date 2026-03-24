@@ -84,6 +84,26 @@ class RunnerStateWorktreeMixin:
             self.state.completed_epics.append(epic)
         self.save_state()
 
+    def _rewrite_sprint_status_key(self, key: str, status_text: str) -> None:
+        sprint_status_file = self.sprint_status_file
+        if not sprint_status_file.exists():
+            return
+        raw = yaml.safe_load(read_text(sprint_status_file, "{}"))
+        if not isinstance(raw, dict):
+            return
+        development_status = raw.get("development_status")
+        if not isinstance(development_status, dict):
+            development_status = {}
+            raw["development_status"] = development_status
+        development_status[key] = status_text
+        write_text(sprint_status_file, yaml.safe_dump(raw, sort_keys=False))
+
+    def mark_epic_done(self, epic_id: str) -> None:
+        self._rewrite_sprint_status_key(f"epic-{epic_id}", SprintStatusValue.DONE.value)
+
+    def mark_epic_retrospective_done(self, epic_id: str) -> None:
+        self._rewrite_sprint_status_key(f"epic-{epic_id}-retrospective", SprintStatusValue.DONE.value)
+
     def state_add_pending_pr(self, epic_id: str, pr_number: int, wt_path: str) -> None:
         self.state.pending_prs = [pr for pr in self.state.pending_prs if pr.epic != epic_id]
         self.state.pending_prs.append(

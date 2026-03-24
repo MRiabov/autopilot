@@ -18,6 +18,7 @@ class Phase(str, Enum):
     COMMIT_SPLIT = "COMMIT_SPLIT"
     QA_AUTOMATION_TEST = "QA_AUTOMATION_TEST"
     CODE_REVIEW = "CODE_REVIEW"
+    EPIC_REVIEW = "EPIC_REVIEW"
     CREATE_PR = "CREATE_PR"
     WAIT_COPILOT = "WAIT_COPILOT"
     WAIT_CHECKS = "WAIT_CHECKS"
@@ -225,6 +226,29 @@ class SprintStatus(BaseModel):
             for key, status in self.development_status.items()
             if key.startswith(prefix) and key != self.retrospective_key(epic_id)
         ]
+
+    def epic_ids(self) -> list[str]:
+        epic_ids: list[str] = []
+        for key in self.development_status.keys():
+            match = re.fullmatch(r"epic-(\d+)", key)
+            if match:
+                epic_ids.append(match.group(1))
+        return epic_ids
+
+    def epic_is_complete(self, epic_id: str) -> bool:
+        entries = self.epic_story_entries(epic_id)
+        return bool(entries) and all(status == SprintStatusValue.DONE for _key, status in entries)
+
+    def epics_pending_retrospective(self) -> list[str]:
+        pending: list[str] = []
+        for epic_id in self.epic_ids():
+            if not self.epic_is_complete(epic_id):
+                continue
+            retrospective_status = self.development_status.get(self.retrospective_key(epic_id))
+            if retrospective_status == SprintStatusValue.DONE:
+                continue
+            pending.append(epic_id)
+        return pending
 
     def active_epic_ids(self) -> list[str]:
         epic_ids: list[str] = []
@@ -456,4 +480,3 @@ class CockpitCodexSwitchCandidate:
     min_margin: int
     min_percentage: int
     average_percentage: float
-

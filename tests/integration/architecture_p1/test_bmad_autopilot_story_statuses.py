@@ -267,6 +267,92 @@ def test_int_autopilot_story_status_lifecycle():
 
 
 @pytest.mark.integration_p1
+def test_int_autopilot_story_flow_finalizes_completed_epic_with_retrospective():
+    mod = _load_autopilot_module()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        story_root = root / "_bmad-output" / "implementation-artifacts"
+        story_root.mkdir(parents=True, exist_ok=True)
+
+        epic_id = "1"
+        story_keys = [
+            "1-1-prepare-epic-review",
+            "1-2-record-retrospective-inputs",
+        ]
+        for story_key in story_keys:
+            (story_root / f"{story_key}.md").write_text("Status: done\n", encoding="utf-8")
+
+        status_path = story_root / "sprint-status.yaml"
+        status_path.write_text(
+            "\n".join(
+                [
+                    "generated: 2026-03-23T00:00:00Z",
+                    "last_updated: 2026-03-23T00:00:00Z",
+                    "project: Problemologist-AI",
+                    "project_key: NOKEY",
+                    "tracking_system: file-system",
+                    f'story_location: "{story_root}"',
+                    "development_status:",
+                    f"  epic-{epic_id}: in-progress",
+                    f"  {story_keys[0]}: done",
+                    f"  {story_keys[1]}: done",
+                    f"  epic-{epic_id}-retrospective: optional",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        runner = object.__new__(mod.AutopilotRunner)
+        runner.project_root = root
+        runner.tmp_dir = root / ".autopilot" / "tmp"
+        runner.tmp_dir.mkdir(parents=True, exist_ok=True)
+        runner.state_file = root / ".autopilot" / "state.json"
+        runner.state = mod.AutopilotState.initial(False)
+        runner.sprint_status_file = status_path
+        runner.base_branch = "main"
+        runner.config = SimpleNamespace(start_from="", epic_pattern="")
+
+        transitions = []
+        prompts: list[str] = []
+
+        runner.load_sprint_status = lambda root=None: mod.SprintStatus.model_validate(
+            yaml.safe_load(status_path.read_text(encoding="utf-8"))
+        )
+        runner.state_current_epic = lambda: epic_id
+        runner.state_set = lambda phase, epic=None: transitions.append(
+            ("state_set", phase.value if hasattr(phase, "value") else phase, epic)
+        )
+        runner.log = lambda *args, **kwargs: None
+        runner.play_sound = lambda *args, **kwargs: None
+
+        def run_codex_exec(prompt, output_file, cwd=None, reasoning_effort=None):
+            prompts.append(str(prompt))
+            output_file.write_text(
+                "Documented retrospective\nSTATUS: RETROSPECTIVE_COMPLETE\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        runner.run_codex_exec = run_codex_exec
+
+        runner.phase_find_story()
+        assert transitions == [("state_set", "EPIC_REVIEW", epic_id)]
+
+        runner.phase_review_epic()
+
+        sprint_status = yaml.safe_load(status_path.read_text(encoding="utf-8"))
+        assert sprint_status["development_status"][f"epic-{epic_id}"] == "done"
+        assert sprint_status["development_status"][f"epic-{epic_id}-retrospective"] == "done"
+        assert runner.state.completed_epics == [epic_id]
+        assert transitions[-1] == ("state_set", "FIND_EPIC", None)
+        assert prompts
+        assert f"Epic id: {epic_id}" in prompts[0]
+        assert "Document the retrospective and return STATUS: RETROSPECTIVE_COMPLETE when done." in prompts[0]
+
+
+@pytest.mark.integration_p1
 def test_int_autopilot_story_dev_prompt_mentions_prior_review():
     mod = _load_autopilot_module()
 

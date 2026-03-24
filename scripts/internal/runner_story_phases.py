@@ -13,6 +13,11 @@ from .utils import read_text, to_jsonable, utc_now, write_text
 
 
 class StoryFlowPhasesMixin:
+    def next_completed_epic_for_review(self, sprint_status) -> str | None:
+        for epic_id in sprint_status.epics_pending_retrospective():
+            return epic_id
+        return None
+
     def phase_find_story(self) -> None:
         self.log("📋 PHASE: FIND_STORY")
         try:
@@ -30,7 +35,13 @@ class StoryFlowPhasesMixin:
             return
 
         if not target:
-            self.log("🎉 No more active stories in sprint-status.yaml")
+            next_epic = self.next_completed_epic_for_review(sprint_status)
+            if next_epic:
+                self.log(f"🪞 Found completed epic pending retrospective: {next_epic}")
+                self.state_set(Phase.EPIC_REVIEW, next_epic)
+                return
+
+            self.log("🎉 No more active stories or pending epic retrospectives in sprint-status.yaml")
             self.state_set(Phase.DONE, None)
             return
 
@@ -48,6 +59,48 @@ class StoryFlowPhasesMixin:
 
         self.log(f"❌ Unsupported story status: {target.status.value}")
         self.state_set(Phase.BLOCKED, None)
+
+    def phase_review_epic(self) -> None:
+        self.log("🪞 PHASE: EPIC_REVIEW")
+        epic_id = self.state_current_epic()
+        if not epic_id:
+            self.log("❌ current_epic missing")
+            self.state_set(Phase.BLOCKED, None)
+            return
+
+        try:
+            sprint_status = self.load_sprint_status()
+            sprint_status.story_files_for_epic(self.project_root, epic_id)
+            if not sprint_status.epic_is_complete(epic_id):
+                raise ValueError(f"Epic {epic_id} is not complete yet")
+        except ValueError as exc:
+            self.log(f"❌ {exc}")
+            self.state_set(Phase.BLOCKED, epic_id)
+            return
+
+        if sprint_status.epic_status(epic_id) != SprintStatusValue.DONE:
+            try:
+                self.mark_epic_done(epic_id)
+            except Exception as exc:
+                self.log(f"❌ Failed to mark epic done: {exc}")
+                self.state_set(Phase.BLOCKED, epic_id)
+                return
+            self.log(f"📝 Updated epic {epic_id} status to done")
+
+        if not self.run_retrospective_for_epic(epic_id):
+            self.state_set(Phase.BLOCKED, epic_id)
+            return
+
+        try:
+            self.mark_epic_retrospective_done(epic_id)
+            self.state_mark_completed(epic_id)
+        except Exception as exc:
+            self.log(f"❌ Failed to mark epic retrospective done: {exc}")
+            self.state_set(Phase.BLOCKED, epic_id)
+            return
+
+        self.state_set(Phase.FIND_EPIC, None)
+        self.log(f"✅ Epic {epic_id} complete; retrospective recorded")
 
     def phase_create_story(self) -> None:
         self.log("📝 PHASE: CREATE_STORY")
