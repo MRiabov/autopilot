@@ -12,6 +12,11 @@ Thumbs.db
 # Logs
 *.log
 
+# Runtime state and generated output
+state.json
+tmp/
+__pycache__/
+*.pyc
+
 # Test output
 test-output/
-
