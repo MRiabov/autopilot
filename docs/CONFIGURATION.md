@@ -150,4 +150,4 @@ PR labels:
 
 - The Python runner is the source of truth.
 - The shell wrapper is only a launcher.
-- The QA phase is intentionally strict about the integration-test workflow and the `specs/integration-tests.md` catalog.
+- The QA phase is intentionally strict about the integration-test workflow and the `.autopilot/specs/integration-tests.md` catalog.

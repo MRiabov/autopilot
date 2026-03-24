@@ -51,7 +51,7 @@ Read `.autopilot/state.json`. If it does not exist, start fresh.
 
 ### QA_AUTOMATION_TEST
 1. Invoke `$integration-tests-workflow`.
-2. Read `specs/integration-tests.md` before adding anything.
+2. Read `.autopilot/specs/integration-tests.md` before adding anything.
 3. Let the skill add or update automated tests using the repository's existing test framework.
 4. The skill must run tests with `./scripts/run_integration_tests.sh`.
 5. Fix failures until the tests pass.

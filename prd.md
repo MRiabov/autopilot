@@ -7,6 +7,8 @@ Its job is to turn a repo, a workflow definition, and a quota-capable Codex acco
 The product is not an editor extension, not a chat wrapper, and not a feature module inside another product.
 It is a self-contained orchestrator with its own config, state, logs, retry policy, and recovery behavior.
 
+Technical decisions and module boundaries live in [architecture.md](architecture.md).
+
 The core promise is progress-first execution.
 The product prefers retry, reroute, account rotation, and timed backoff over stopping.
 It only becomes terminal when no usable account remains, or when the workspace is unrecoverably unsafe to continue.

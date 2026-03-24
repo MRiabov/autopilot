@@ -89,11 +89,11 @@ The legacy flow keeps the previous PR, Copilot, and merge handling in place for 
 The QA phase is intentionally strict:
 
 - Read `.codex/skills/integration-tests-workflow/SKILL.md` first.
-- Read `specs/integration-tests.md` before adding anything.
+- Read `.autopilot/specs/integration-tests.md` before adding anything.
 - Use only `./scripts/run_integration_tests.sh` to execute integration tests.
 - Keep tests at HTTP/system boundaries.
 - Do not mock or patch project internals.
-- Update `specs/integration-tests.md` if the catalog changes.
+- Update `.autopilot/specs/integration-tests.md` if the catalog changes.
 
 ## Configuration
 
