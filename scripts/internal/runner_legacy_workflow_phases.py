@@ -327,7 +327,12 @@ class LegacyWorkflowPhasesMixin:
             phase_name="epic-code-review",
             contract=dedent(
                 """
-                Return YAML frontmatter only with:
+                Return YAML frontmatter first, then a freeform Markdown review body.
+                Use the body for findings, rationale, and follow-up notes; do not stop at file names.
+                If there are findings, write them as Markdown bullets or a `## Review Findings` section.
+                If the review is clean, still include a short Markdown note explaining that no issues were found.
+
+                Frontmatter fields:
                 - review_status: pass | fail
                 - review_scope_fingerprint: exact fingerprint from the prompt
                 - reviewed_files: list of reviewed file paths relative to the repository root

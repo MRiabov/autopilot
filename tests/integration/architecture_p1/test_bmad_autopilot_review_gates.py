@@ -875,7 +875,8 @@ def test_int_autopilot_retries_code_review_in_same_session():
                         "reviewed_files:",
                         *[f"  - {path}" for path in reviewed_files],
                         "---",
-                        "second attempt",
+                        "## Review Notes",
+                        "- Reviewed the changed files and recorded findings in the markdown body.",
                     ]
                 )
                 + "\n",
@@ -903,6 +904,8 @@ def test_int_autopilot_retries_code_review_in_same_session():
         assert calls[0]["session_id"] is None
         assert calls[1]["session_id"] == "thread-abc"
         assert "review_scope_fingerprint" in calls[1]["prompt"]
+        assert "freeform markdown review body" in calls[1]["prompt"].lower()
+        assert "review findings" in calls[1]["prompt"].lower()
         assert transitions[-1] == ("state_set", "FIND_EPIC", None)
 
 
