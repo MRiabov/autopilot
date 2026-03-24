@@ -80,7 +80,7 @@ AUTOPILOT_BASE_BRANCH=develop ./.autopilot/bmad-autopilot.sh
 
 ## Sprint Status Queue
 
-The runner reads `_bmad-output/implementation-artifacts/sprint-status.yaml` and follows story rows in file order. In story flow it prioritizes `in-progress`, then `review`, then `ready-for-dev`, then `backlog`.
+The runner reads `_bmad-output/implementation-artifacts/sprint-status.yaml` and follows story rows in file order. In story flow it checks for `review` stories first, then continues with implementation stories in file order, then `backlog`.
 
 ## Start-From Selector
 
@@ -92,7 +92,7 @@ Use `--from` to skip ahead to a later story or epic when starting a fresh run:
 ./.autopilot/bmad-autopilot.sh --from 3
 ```
 
-The selector is applied before the normal story-priority ordering, so earlier stories are ignored. In story flow the value can be a story key like `3-1`, a dot-form alias like `3.1`, or an epic number like `3`.
+The selector is applied before the normal story selection order, so earlier stories are ignored. In story flow the value can be a story key like `3-1`, a dot-form alias like `3.1`, or an epic number like `3`.
 
 ## Local Checks Configuration
 

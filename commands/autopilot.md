@@ -21,7 +21,7 @@ Read `.autopilot/state.json`. If it does not exist, start fresh.
 
 ### Story Flow
 1. Read `_bmad-output/implementation-artifacts/sprint-status.yaml`.
-2. Select the next story in this order: `in-progress`, `review`, `ready-for-dev`, `backlog`.
+2. Select the next story with `review` stories first, then implementation stories in file order, then `backlog`.
 3. If a start-from selector is provided, ignore stories earlier than that story key or epic.
 4. If only backlog remains, run `$bmad-create-story`.
 5. Run `$bmad-dev-story` on the selected story.
