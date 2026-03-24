@@ -296,6 +296,31 @@ def test_int_autopilot_requires_explicit_confirmation_on_dirty_workspace():
 
 
 @pytest.mark.integration_p2
+def test_int_autopilot_accept_dirty_worktree_skips_prompt(monkeypatch):
+    """
+    `--accept-dirty-worktree` must bypass the interactive prompt entirely.
+    """
+    mod = _load_autopilot_module()
+
+    runner = object.__new__(mod.AutopilotRunner)
+    runner.config = mod.RuntimeConfig(accept_dirty_worktree=True)
+
+    messages: list[str] = []
+    runner.log = lambda message: messages.append(str(message))
+    runner.run_text = lambda *args, **kwargs: " M dirty-file.py\n"
+
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda *args, **kwargs: pytest.fail("dirty-tree prompt should be skipped"),
+    )
+
+    runner.confirm_dirty_worktree(Path("/tmp"), context="story flow")
+
+    assert any("Dirty worktree accepted via --accept-dirty-worktree." in line for line in messages)
+    assert not any("Continue anyway?" in line for line in messages)
+
+
+@pytest.mark.integration_p2
 def test_int_autopilot_reroutes_empty_review_source_back_to_dev():
     """
     INT-207: BMAD autopilot must reroute empty review scope back to
@@ -804,4 +829,3 @@ def test_int_autopilot_retries_code_review_in_same_session():
         assert calls[1]["session_id"] == "thread-abc"
         assert "review_scope_fingerprint" in calls[1]["prompt"]
         assert transitions[-1] == ("state_set", "FIND_EPIC", None)
-
