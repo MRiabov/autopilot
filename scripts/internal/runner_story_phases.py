@@ -401,6 +401,7 @@ class StoryFlowPhasesMixin:
                 - review_status: pass | fail
                 - review_scope_fingerprint: exact fingerprint from the prompt
                 - reviewed_files: list of reviewed file paths relative to the repository root
+                  Additional repo-relative files you consulted are allowed.
                 """
             ).strip(),
             validator=lambda output_text: self.validate_review_output(

@@ -549,37 +549,125 @@ class RunnerEnvironmentMixin:
         if not isinstance(event, dict):
             return None
         event_type = event.get("type")
-        if event_type == "thread.started":
-            thread_id = event.get("thread_id")
-            return f"thread.started: {thread_id}" if thread_id else "thread.started"
-        if event_type == "turn.started":
-            return "turn.started"
-        if event_type == "turn.completed":
-            usage = event.get("usage")
-            if isinstance(usage, dict):
-                parts = []
-                for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
-                    if key in usage:
-                        parts.append(f"{key}={usage[key]}")
-                if parts:
-                    return "turn.completed: " + ", ".join(parts)
-            return "turn.completed"
-        if event_type == "item.completed":
-            item = event.get("item")
-            if isinstance(item, dict):
-                item_type = item.get("type") or "item"
-                item_id = item.get("id")
-                text = item.get("text")
-                if item_id and text:
-                    preview = str(text).strip().replace("\n", " ")
-                    if len(preview) > 120:
-                        preview = preview[:117] + "..."
-                    return f"item.completed: {item_type} {item_id} {preview}"
-                if item_id:
-                    return f"item.completed: {item_type} {item_id}"
-                return f"item.completed: {item_type}"
-            return "item.completed"
-        return None
+        if not isinstance(event_type, str) or not event_type.strip():
+            return None
+        event_type = event_type.strip()
+
+        def render_value(value: Any) -> str:
+            return json.dumps(to_jsonable(value), ensure_ascii=False)
+
+        def render_structlog(fields: dict[str, Any]) -> str:
+            parts = []
+            for key, value in fields.items():
+                if value is None:
+                    continue
+                if isinstance(value, str) and not value:
+                    continue
+                parts.append(f"{key}={render_value(value)}")
+            return " ".join(parts)
+
+        def merge_fields(
+            fields: dict[str, Any],
+            source: dict[str, Any],
+            *,
+            prefix: str = "",
+            skip: set[str] | frozenset[str] = frozenset(),
+        ) -> None:
+            for key, value in source.items():
+                if key in skip or value is None:
+                    continue
+                if isinstance(value, str) and not value:
+                    continue
+                fields[f"{prefix}{key}"] = value
+
+        def item_step(item: dict[str, Any]) -> Any:
+            item_id = item.get("id")
+            if isinstance(item_id, int):
+                return item_id
+            if isinstance(item_id, str):
+                match = re.search(r"(\d+)$", item_id)
+                if match:
+                    return int(match.group(1))
+                if item_id.strip():
+                    return item_id.strip()
+            return None
+
+        def item_sender(item_type: str, item: dict[str, Any]) -> str:
+            sender = item.get("sender")
+            if isinstance(sender, str) and sender.strip():
+                return sender.strip()
+            role = item.get("role")
+            if isinstance(role, str) and role.strip():
+                return role.strip()
+            if item_type == "agent_message":
+                return "assistant"
+            if item_type in {"command_execution", "file_change"}:
+                return "tool"
+            return "codex"
+
+        def item_content(item: dict[str, Any]) -> str | None:
+            for key in ("text", "content", "command", "path", "file_path", "aggregated_output", "output", "message", "delta"):
+                value = item.get(key)
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    if cleaned:
+                        return cleaned.replace("\n", " ")
+                elif value not in (None, ""):
+                    rendered = str(value).strip()
+                    if rendered:
+                        return rendered.replace("\n", " ")
+            nested_message = item.get("message")
+            if isinstance(nested_message, dict):
+                nested_content = nested_message.get("content")
+                if isinstance(nested_content, str) and nested_content.strip():
+                    return nested_content.strip().replace("\n", " ")
+            return None
+
+        fields: dict[str, Any] = {"event": event_type}
+        merge_fields(fields, event, skip={"type", "thread_id", "item", "usage"})
+
+        thread_id = event.get("thread_id")
+        if isinstance(thread_id, str) and thread_id.strip():
+            fields["thread_id"] = thread_id.strip()
+
+        usage = event.get("usage")
+        if isinstance(usage, dict):
+            merge_fields(fields, usage)
+
+        item = event.get("item")
+        if isinstance(item, dict):
+            item_type = item.get("type") or "item"
+            item_id = item.get("id")
+            fields["sender"] = item_sender(str(item_type), item)
+            fields["step"] = item_step(item)
+            fields["item_type"] = item_type
+            fields["item_id"] = item_id
+            fields["content"] = item_content(item)
+            if isinstance(item.get("status"), str) and item["status"].strip():
+                fields["status"] = item["status"].strip()
+            merge_fields(
+                fields,
+                item,
+                prefix="item_",
+                skip={
+                    "id",
+                    "type",
+                    "sender",
+                    "role",
+                    "text",
+                    "content",
+                    "command",
+                    "path",
+                    "file_path",
+                    "aggregated_output",
+                    "output",
+                    "message",
+                    "delta",
+                    "status",
+                },
+            )
+
+        return render_structlog(fields)
 
     @staticmethod
     def format_prompt_preview(prompt: str, *, max_lines: int = 16, max_line_width: int = 120) -> str:
@@ -660,7 +748,7 @@ class RunnerEnvironmentMixin:
                         continue
                     pretty = self.format_codex_event(event)
                     if pretty:
-                        print(pretty)
+                        self.log(pretty)
                     else:
                         print(line, end="")
                     if isinstance(event, dict) and event.get("type") == "thread.started":

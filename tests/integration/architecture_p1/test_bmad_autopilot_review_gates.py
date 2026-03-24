@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -131,6 +132,16 @@ def _write_fake_codex(bin_dir: Path, marker_file: Path) -> None:
                 "",
                 "print(json.dumps({'type': 'thread.started', 'thread_id': thread_id}))",
                 "print(json.dumps({'type': 'turn.started'}))",
+                "if mode == 'logfmt':",
+                "    if out_file:",
+                "        Path(out_file).parent.mkdir(parents=True, exist_ok=True)",
+                "        Path(out_file).write_text('---\\nreview_status: pass\\n---\\nlogfmt test\\n', encoding='utf-8')",
+                "    print(json.dumps({'type': 'item.started', 'item': {'id': 'item_718', 'type': 'command_execution', 'command': '/bin/bash -lc echo hello', 'status': 'in_progress'}}))",
+                "    print(json.dumps({'type': 'item.completed', 'item': {'id': 'item_719', 'type': 'agent_message', 'text': 'done'}}))",
+                "    print(json.dumps({'type': 'item.completed', 'item': {'id': 'item_720', 'type': 'file_change', 'path': 'src/example.py'}}))",
+                "    print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 1, 'cached_input_tokens': 0, 'output_tokens': 1}}))",
+                "    print(json.dumps({'type': 'session.completed', 'session_id': 'session-1', 'status': 'ok', 'payload': {'nested': 'value'}}))",
+                "    sys.exit(0)",
                 "if mode == 'quota_retry':",
                 "    quota_state_path = Path(state_file) if state_file else None",
                 "    quota_attempt = 0",
@@ -318,6 +329,70 @@ def test_int_autopilot_accept_dirty_worktree_skips_prompt(monkeypatch):
 
     assert any("Dirty worktree accepted via --accept-dirty-worktree." in line for line in messages)
     assert not any("Continue anyway?" in line for line in messages)
+
+
+@pytest.mark.integration_p2
+def test_int_autopilot_review_allows_extra_repo_relative_files():
+    mod = _load_autopilot_module()
+
+    runner = object.__new__(mod.AutopilotRunner)
+    output_text = "\n".join(
+        [
+            "---",
+            "review_status: pass",
+            "review_scope_fingerprint: fingerprint-1",
+            "reviewed_files:",
+            "  - src/core.py",
+            "  - docs/notes.md",
+            "  - _bmad-output/review-artifacts/code-review-round-1.md",
+            "---",
+            "reviewed additional repo files",
+            "",
+        ]
+    )
+
+    parsed, failure = runner.parse_review_output(
+        output_text,
+        expected_fingerprint="fingerprint-1",
+        valid_files={"src/core.py"},
+    )
+
+    assert failure is None
+    assert parsed is not None
+    assert parsed.reviewed_files == [
+        "src/core.py",
+        "docs/notes.md",
+        "_bmad-output/review-artifacts/code-review-round-1.md",
+    ]
+
+
+@pytest.mark.integration_p2
+def test_int_autopilot_review_rejects_non_repo_relative_files():
+    mod = _load_autopilot_module()
+
+    runner = object.__new__(mod.AutopilotRunner)
+    output_text = "\n".join(
+        [
+            "---",
+            "review_status: pass",
+            "review_scope_fingerprint: fingerprint-1",
+            "reviewed_files:",
+            "  - /tmp/outside.txt",
+            "---",
+            "bad path",
+            "",
+        ]
+    )
+
+    parsed, failure = runner.parse_review_output(
+        output_text,
+        expected_fingerprint="fingerprint-1",
+        valid_files={"src/core.py"},
+    )
+
+    assert parsed is None
+    assert failure is not None
+    assert failure.error_code == "invalid_reviewed_files"
 
 
 @pytest.mark.integration_p2
@@ -829,3 +904,87 @@ def test_int_autopilot_retries_code_review_in_same_session():
         assert calls[1]["session_id"] == "thread-abc"
         assert "review_scope_fingerprint" in calls[1]["prompt"]
         assert transitions[-1] == ("state_set", "FIND_EPIC", None)
+
+
+@pytest.mark.integration_p2
+def test_int_autopilot_codex_json_events_are_logged_as_structlog():
+    """
+    INT-213: Codex JSON item events must be rendered into structlog-style
+    key/value lines that include sender, step, and content.
+    """
+    mod = _load_autopilot_module()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _init_repo(root)
+        with tempfile.TemporaryDirectory() as tool_tmp:
+            tool_root = Path(tool_tmp)
+            marker_file = tool_root / "codex-marker.txt"
+            _write_fake_codex(tool_root, marker_file)
+
+            original_path = os.environ.get("PATH", "")
+            original_marker = os.environ.get("FAKE_CODEX_MARKER")
+            original_mode = os.environ.get("FAKE_CODEX_MODE")
+            os.environ["PATH"] = f"{tool_root}{os.pathsep}{original_path}"
+            os.environ["FAKE_CODEX_MARKER"] = str(marker_file)
+            os.environ["FAKE_CODEX_MODE"] = "logfmt"
+
+            try:
+                runner = object.__new__(mod.AutopilotRunner)
+                runner.project_root = root
+                runner.tmp_dir = root / ".autopilot" / "tmp"
+                runner.tmp_dir.mkdir(parents=True, exist_ok=True)
+                runner.config = mod.RuntimeConfig()
+                runner.codex_reasoning_effort = "high"
+                runner.codex_switcher = SimpleNamespace(maybe_switch=lambda *_args, **_kwargs: None)
+
+                messages: list[str] = []
+                runner.log = lambda message: messages.append(str(message))
+
+                result = runner.run_codex_session(
+                    "prompt", output_file=runner.tmp_dir / "codex-output.txt", cwd=root
+                )
+
+                assert result.return_code == 0
+                assert any("event=\"item.started\"" in line for line in messages)
+                assert any(
+                    "event=\"item.started\"" in line
+                    and "sender=\"tool\"" in line
+                    and "step=718" in line
+                    and "item_type=\"command_execution\"" in line
+                    and "content=\"/bin/bash -lc" in line
+                    for line in messages
+                )
+                assert any(
+                    "event=\"item.completed\"" in line
+                    and "sender=\"assistant\"" in line
+                    and "step=719" in line
+                    and "item_type=\"agent_message\"" in line
+                    and "content=\"done\"" in line
+                    for line in messages
+                )
+                assert any(
+                    "event=\"item.completed\"" in line
+                    and "sender=\"tool\"" in line
+                    and "step=720" in line
+                    and "item_type=\"file_change\"" in line
+                    and "content=\"src/example.py\"" in line
+                    for line in messages
+                )
+                assert any(
+                    "event=\"session.completed\"" in line
+                    and "session_id=\"session-1\"" in line
+                    and "status=\"ok\"" in line
+                    and "payload=" in line
+                    for line in messages
+                )
+            finally:
+                os.environ["PATH"] = original_path
+                if original_marker is None:
+                    os.environ.pop("FAKE_CODEX_MARKER", None)
+                else:
+                    os.environ["FAKE_CODEX_MARKER"] = original_marker
+                if original_mode is None:
+                    os.environ.pop("FAKE_CODEX_MODE", None)
+                else:
+                    os.environ["FAKE_CODEX_MODE"] = original_mode

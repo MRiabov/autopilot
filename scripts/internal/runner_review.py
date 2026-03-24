@@ -70,6 +70,16 @@ class RunnerReviewMixin:
                 names.append(line)
         return names
 
+    @staticmethod
+    def reviewed_file_is_repo_relative(path: str) -> bool:
+        normalized = str(path).strip().replace("\\", "/")
+        if not normalized:
+            return False
+        candidate = Path(normalized)
+        if candidate.is_absolute():
+            return False
+        return all(part != ".." for part in candidate.parts)
+
     def review_scope_fingerprint(self, source: ReviewSourceSnapshot) -> str:
         payload = {
             "branch_diff": self.review_scope_file_names(source.branch_diff),
@@ -221,13 +231,15 @@ class RunnerReviewMixin:
                 expected=expected_fingerprint,
             )
 
-        invalid_files = [path for path in parsed.reviewed_files if path not in valid_files]
+        invalid_files = [
+            path for path in parsed.reviewed_files if not self.reviewed_file_is_repo_relative(path)
+        ]
         if invalid_files:
             return None, ValidationFailure(
                 error_code="invalid_reviewed_files",
                 field="reviewed_files",
-                message="reviewed_files contains paths outside the review scope",
-                expected=", ".join(sorted(valid_files)) if valid_files else "(no reviewable files)",
+                message="reviewed_files must contain repo-relative paths",
+                expected="repo-relative file paths",
             )
 
         return parsed, None
@@ -501,6 +513,7 @@ class RunnerReviewMixin:
             "- review_status: pass | fail",
             "- review_scope_fingerprint: exact fingerprint from the prompt",
             "- reviewed_files: list of reviewed file paths relative to the repository root",
+            "  Additional repo-relative files you consulted are allowed.",
         ]
         return dedent("\n".join(str(line) for line in lines if line is not None)).strip() + "\n"
 
@@ -529,6 +542,7 @@ class RunnerReviewMixin:
                 "- review_status: pass | fail",
                 "- review_scope_fingerprint: exact fingerprint from the prompt",
                 "- reviewed_files: list of reviewed file paths relative to the repository root",
+                "  Additional repo-relative files you consulted are allowed.",
             ]
         )
         return dedent("\n".join(str(line) for line in lines if line is not None)).strip() + "\n"
