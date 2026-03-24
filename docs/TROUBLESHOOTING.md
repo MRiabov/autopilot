@@ -116,6 +116,7 @@ echo '{"mode":"sequential","phase":"FIND_EPIC","current_epic":null,"current_stor
 
 If `stories_blocked` appears in the log, that is a transient dev-phase reroute signal. The launcher keeps the story in-progress and reroutes back to development immediately instead of persisting a blocked story state.
 If Codex reports quota exhaustion, the launcher will try to switch to a healthier account first. If no account can be rotated in, it waits for `AUTOPILOT_QUOTA_RETRY_SECONDS` and retries.
+If you want to skip the dirty-worktree prompt entirely, launch with `--accept-dirty-worktree`.
 
 ### Run individual phases
 

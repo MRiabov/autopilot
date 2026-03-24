@@ -73,6 +73,7 @@ AUTOPILOT_FLOW=legacy ./.autopilot/bmad-autopilot.sh
 
 When code review passes, BMAD Autopilot writes `done` to the story file and to `sprint-status.yaml`, then selects the next story.
 If the workspace is dirty at launch, the runner now requires explicit `y`/`yes` confirmation before proceeding.
+Use `--accept-dirty-worktree` if you want to skip that prompt and continue immediately.
 Code review evaluates the current workspace snapshot, not only the committed branch diff, and persists review artifacts under that workspace root.
 If a dev pass reports `stories_blocked`, the runner keeps the story `in-progress` and reroutes back to development immediately instead of treating the story as terminally blocked.
 If Codex reports quota exhaustion, the runner switches to a healthier account when possible or waits and retries when no account can be rotated in.
