@@ -2,6 +2,7 @@ import importlib.util
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,77 @@ def _init_git_repo(root: Path) -> None:
     _run_git(root, "config", "user.name", "Codex")
     _run_git(root, "add", "-A")
     _run_git(root, "commit", "-m", "init")
+
+
+@pytest.mark.integration_p1
+def test_int_autopilot_story_selection_is_review_first_then_sequential():
+    mod = _load_autopilot_module()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        story_root = root / "_bmad-output" / "implementation-artifacts"
+        story_root.mkdir(parents=True, exist_ok=True)
+
+        ready_story = "3-4-prefer-the-simpler-valid-solution"
+        review_story = "5-2-visualize-cad-and-simulation-evidence"
+        later_ready_story = "5-3-view-code-and-artifacts"
+        for story_key, status in (
+            (ready_story, "ready-for-dev"),
+            (review_story, "review"),
+            (later_ready_story, "ready-for-dev"),
+        ):
+            (story_root / f"{story_key}.md").write_text(
+                f"Status: {status}\n",
+                encoding="utf-8",
+            )
+
+        status_path = story_root / "sprint-status.yaml"
+        status_path.write_text(
+            "\n".join(
+                [
+                    "generated: 2026-03-23T00:00:00Z",
+                    "last_updated: 2026-03-23T00:00:00Z",
+                    "project: Problemologist-AI",
+                    "project_key: NOKEY",
+                    "tracking_system: file-system",
+                    'story_location: "_bmad-output/implementation-artifacts"',
+                    "development_status:",
+                    "  epic-3: in-progress",
+                    f"  {ready_story}: ready-for-dev",
+                    "  epic-5: in-progress",
+                    f"  {review_story}: review",
+                    f"  {later_ready_story}: ready-for-dev",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        runner = object.__new__(mod.AutopilotRunner)
+        runner.project_root = root
+        runner.config = SimpleNamespace(start_from="", epic_pattern="")
+
+        sprint_status_raw = yaml.safe_load(status_path.read_text(encoding="utf-8"))
+        sprint_status = mod.SprintStatus.model_validate(sprint_status_raw)
+
+        target = runner.select_next_story(sprint_status)
+        assert target is not None
+        assert target.key == review_story
+        assert target.status == mod.SprintStatusValue.REVIEW
+
+        sprint_status_raw["development_status"][review_story] = "done"
+        status_path.write_text(
+            yaml.safe_dump(sprint_status_raw, sort_keys=False),
+            encoding="utf-8",
+        )
+        refreshed = mod.SprintStatus.model_validate(
+            yaml.safe_load(status_path.read_text(encoding="utf-8"))
+        )
+
+        next_target = runner.select_next_story(refreshed)
+        assert next_target is not None
+        assert next_target.key == ready_story
+        assert next_target.status == mod.SprintStatusValue.READY_FOR_DEV
 
 
 @pytest.mark.integration_p1
@@ -192,6 +264,125 @@ def test_int_autopilot_story_status_lifecycle():
         assert transitions[1] == ("COMMIT_SPLIT", story_key)
         assert transitions[2] == ("CODE_REVIEW", story_key)
         assert transitions[-1] == ("state_set", "FIND_EPIC", None)
+
+
+@pytest.mark.integration_p1
+def test_int_autopilot_story_dev_prompt_mentions_prior_review():
+    mod = _load_autopilot_module()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        story_key = "1-5-test-story"
+        story_path = (
+            root / "_bmad-output" / "implementation-artifacts" / f"{story_key}.md"
+        )
+        status_path = (
+            root / "_bmad-output" / "implementation-artifacts" / "sprint-status.yaml"
+        )
+        review_artifact = (
+            root
+            / "_bmad-outputs"
+            / "review-artifacts"
+            / "qa-review-20260324_080000.md"
+        )
+        story_path.parent.mkdir(parents=True, exist_ok=True)
+        review_artifact.parent.mkdir(parents=True, exist_ok=True)
+        story_path.write_text("Status: in-progress\n", encoding="utf-8")
+        review_artifact.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "review_status: fail",
+                    "---",
+                    "phase_name: QA_AUTOMATION_TEST",
+                    f"source_output: {root / '.autopilot' / 'tmp' / 'qa-story-output.txt'}",
+                    "return_code: 0",
+                    "",
+                    f"Story: {story_key}",
+                    "",
+                    "output:",
+                    "---",
+                    "review_status: fail",
+                    "---",
+                    "QA blocked",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        status_path.write_text(
+            "\n".join(
+                [
+                    "generated: 2026-03-23T00:00:00Z",
+                    "last_updated: 2026-03-23T00:00:00Z",
+                    "project: Problemologist-AI",
+                    "project_key: NOKEY",
+                    "tracking_system: file-system",
+                    f'story_location: "{root / "_bmad-output" / "implementation-artifacts"}"',
+                    "development_status:",
+                    "  epic-1: in-progress",
+                    f"  {story_key}: in-progress",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        _init_git_repo(root)
+
+        runner = object.__new__(mod.AutopilotRunner)
+        runner.project_root = root
+        runner.tmp_dir = root / ".autopilot" / "tmp"
+        runner.tmp_dir.mkdir(parents=True, exist_ok=True)
+        runner.sprint_status_file = status_path
+        runner.base_branch = "main"
+
+        runner.state_current_story = lambda: story_key
+        runner.load_sprint_status = lambda root=None: mod.SprintStatus.model_validate(
+            yaml.safe_load(status_path.read_text(encoding="utf-8"))
+        )
+        runner.story_file_for_key = lambda sprint_status, key, root=None: story_path
+        runner.autopilot_checks = lambda *args, **kwargs: None
+        runner.play_sound = lambda *args, **kwargs: None
+        runner.log = lambda *args, **kwargs: None
+        transitions = []
+        runner.state_set_story = lambda phase, sk, sf=None: transitions.append(
+            (phase.value if hasattr(phase, "value") else phase, sk)
+        )
+        runner.state_set = lambda phase, epic=None: transitions.append(
+            ("state_set", phase.value if hasattr(phase, "value") else phase, epic)
+        )
+
+        prompts: list[str] = []
+
+        def run_codex_session_with_retry(*args, **kwargs):
+            prompts.append(str(kwargs.get("initial_prompt", "")))
+            return mod.CodexAttemptResult(
+                return_code=0,
+                thread_id="thread-dev-review-note",
+                output_text="\n".join(
+                    [
+                        "---",
+                        "workflow_status: stories_complete",
+                        f"story_key: {story_key}",
+                        "story_status: review",
+                        "---",
+                        "Implementation complete",
+                        "",
+                    ]
+                ),
+            )
+
+        runner.run_codex_session_with_retry = run_codex_session_with_retry
+
+        runner.phase_develop_story()
+
+        assert prompts
+        prompt = prompts[0]
+        assert "Prior review detected:" in prompt
+        assert "There was a qa review at:" in prompt
+        assert "Read that review before continuing." in prompt
+        assert str(review_artifact) in prompt
+        assert transitions[-1] == ("COMMIT_SPLIT", story_key)
 
 
 @pytest.mark.integration_p1
