@@ -7,4 +7,3 @@ from .runner_legacy_pr_phases import LegacyPrPhasesMixin
 from .runner_legacy_workflow_phases import LegacyWorkflowPhasesMixin
 
 __all__ = ["LegacyPrPhasesMixin", "LegacyWorkflowPhasesMixin"]
-

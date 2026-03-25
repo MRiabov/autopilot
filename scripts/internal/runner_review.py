@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
@@ -14,8 +13,14 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from .models import EpicDevOutput, ReviewDecisionOutput, ReviewSourceSnapshot, StoryDevOutput, ValidationFailure
-from .utils import read_text, to_jsonable, write_text
+from .models import (
+    EpicDevOutput,
+    ReviewDecisionOutput,
+    ReviewSourceSnapshot,
+    StoryDevOutput,
+    ValidationFailure,
+)
+from .utils import read_text, write_text
 
 
 class RunnerReviewMixin:
@@ -87,13 +92,19 @@ class RunnerReviewMixin:
             "has_reviewable_source": source.has_reviewable_source,
             "staged_diff": self.review_scope_file_names(source.staged_diff),
             "unstaged_diff": self.review_scope_file_names(source.unstaged_diff),
-            "working_tree_status": self.review_scope_file_names(source.working_tree_status),
+            "working_tree_status": self.review_scope_file_names(
+                source.working_tree_status
+            ),
         }
-        digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         return digest
 
     def latest_review_artifacts(self, root: Path | None = None) -> dict[str, Path]:
-        artifact_dir = (root or self.project_root) / "_bmad-outputs" / "review-artifacts"
+        artifact_dir = (
+            (root or self.project_root) / "_bmad-outputs" / "review-artifacts"
+        )
         if not artifact_dir.exists():
             return {}
 
@@ -110,7 +121,9 @@ class RunnerReviewMixin:
                 latest[kind] = (stamp, path)
         return {kind: path for kind, (_stamp, path) in latest.items()}
 
-    def review_status_from_artifact(self, kind: str, root: Path | None = None) -> str | None:
+    def review_status_from_artifact(
+        self, kind: str, root: Path | None = None
+    ) -> str | None:
         artifact = self.latest_review_artifacts(root=root).get(kind)
         if not artifact or not artifact.exists():
             return None
@@ -125,7 +138,9 @@ class RunnerReviewMixin:
         story_key: str,
         root: Path | None = None,
     ) -> tuple[str, Path] | None:
-        artifact_dir = (root or self.project_root) / "_bmad-outputs" / "review-artifacts"
+        artifact_dir = (
+            (root or self.project_root) / "_bmad-outputs" / "review-artifacts"
+        )
         if not artifact_dir.exists():
             return None
 
@@ -170,7 +185,11 @@ class RunnerReviewMixin:
 
         review_status = self.review_status_from_output(output_text)
         if review_status is None and status_hint:
-            review_status = "fail" if "blocked" in status_hint.lower() or "fail" in status_hint.lower() else "pass"
+            review_status = (
+                "fail"
+                if "blocked" in status_hint.lower() or "fail" in status_hint.lower()
+                else "pass"
+            )
         if review_status is None:
             review_status = "fail"
 
@@ -232,7 +251,9 @@ class RunnerReviewMixin:
             )
 
         invalid_files = [
-            path for path in parsed.reviewed_files if not self.reviewed_file_is_repo_relative(path)
+            path
+            for path in parsed.reviewed_files
+            if not self.reviewed_file_is_repo_relative(path)
         ]
         if invalid_files:
             return None, ValidationFailure(
@@ -368,8 +389,9 @@ class RunnerReviewMixin:
         return "\n".join(rendered)
 
     def build_story_create_prompt(self, story_key: str, story_path: Path) -> str:
-        return dedent(
-            f"""
+        return (
+            dedent(
+                f"""
             Create or update the story document for {story_key}.
 
             Story path:
@@ -378,7 +400,9 @@ class RunnerReviewMixin:
             Keep the output focused on the story content and preserve the repository
             conventions in the story file.
             """
-        ).strip() + "\n"
+            ).strip()
+            + "\n"
+        )
 
     def build_story_dev_prompt(
         self,
@@ -408,21 +432,24 @@ class RunnerReviewMixin:
                     "- Read that review before continuing.",
                 ]
             )
-        return dedent(
-            "\n".join(
-                [
-                    "Develop the following story to completion.",
-                    "",
-                    *lines,
-                    "",
-                    "Return YAML frontmatter only with:",
-                    "- workflow_status: stories_complete | stories_blocked",
-                    "- story_key: exact story key",
-                    "- story_status: review | in-progress",
-                    "- blocking_reason: required only when blocked",
-                ]
-            )
-        ).strip() + "\n"
+        return (
+            dedent(
+                "\n".join(
+                    [
+                        "Develop the following story to completion.",
+                        "",
+                        *lines,
+                        "",
+                        "Return YAML frontmatter only with:",
+                        "- workflow_status: stories_complete | stories_blocked",
+                        "- story_key: exact story key",
+                        "- story_status: review | in-progress",
+                        "- blocking_reason: required only when blocked",
+                    ]
+                )
+            ).strip()
+            + "\n"
+        )
 
     def build_dev_story_prompt(self, *args: Any, **kwargs: Any) -> str:
         sprint_status = kwargs.get("sprint_status")
@@ -439,7 +466,9 @@ class RunnerReviewMixin:
             workspace_root = kwargs.get("workspace_root")
             lines = [
                 f"Epic id: {epic_id}",
-                f"Sprint status source: {sprint_status_file}" if sprint_status_file else None,
+                f"Sprint status source: {sprint_status_file}"
+                if sprint_status_file
+                else None,
                 f"Workspace root: {workspace_root}" if workspace_root else None,
                 "",
                 "Story files:",
@@ -455,13 +484,19 @@ class RunnerReviewMixin:
                     "- blocking_reason: required only when blocked",
                 ]
             )
-            return dedent("\n".join(str(line) for line in lines if line is not None)).strip() + "\n"
+            return (
+                dedent(
+                    "\n".join(str(line) for line in lines if line is not None)
+                ).strip()
+                + "\n"
+            )
 
         return self.build_story_dev_prompt(*args, **kwargs)
 
     def build_story_qa_prompt(self, story_key: str, story_path: Path) -> str:
-        return dedent(
-            f"""
+        return (
+            dedent(
+                f"""
             Review the implementation for story {story_key} and decide whether QA passes.
 
             Story path:
@@ -470,7 +505,9 @@ class RunnerReviewMixin:
             Return YAML frontmatter only with:
             - review_status: pass | fail
             """
-        ).strip() + "\n"
+            ).strip()
+            + "\n"
+        )
 
     def build_qa_prompt(
         self,
@@ -494,7 +531,10 @@ class RunnerReviewMixin:
                 "- review_status: pass | fail",
             ]
         )
-        return dedent("\n".join(str(line) for line in lines if line is not None)).strip() + "\n"
+        return (
+            dedent("\n".join(str(line) for line in lines if line is not None)).strip()
+            + "\n"
+        )
 
     def build_story_code_review_prompt(
         self,
@@ -520,7 +560,10 @@ class RunnerReviewMixin:
             "- reviewed_files: list of reviewed file paths relative to the repository root",
             "  Additional repo-relative files you consulted are allowed.",
         ]
-        return dedent("\n".join(str(line) for line in lines if line is not None)).strip() + "\n"
+        return (
+            dedent("\n".join(str(line) for line in lines if line is not None)).strip()
+            + "\n"
+        )
 
     def build_code_review_prompt(
         self,
@@ -555,7 +598,10 @@ class RunnerReviewMixin:
                 "  Additional repo-relative files you consulted are allowed.",
             ]
         )
-        return dedent("\n".join(str(line) for line in lines if line is not None)).strip() + "\n"
+        return (
+            dedent("\n".join(str(line) for line in lines if line is not None)).strip()
+            + "\n"
+        )
 
     def build_commit_split_prompt(
         self,

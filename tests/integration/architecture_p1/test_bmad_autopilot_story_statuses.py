@@ -2,8 +2,8 @@ import importlib.util
 import subprocess
 import sys
 import tempfile
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -281,7 +281,9 @@ def test_int_autopilot_story_flow_finalizes_completed_epic_with_retrospective():
             "1-2-record-retrospective-inputs",
         ]
         for story_key in story_keys:
-            (story_root / f"{story_key}.md").write_text("Status: done\n", encoding="utf-8")
+            (story_root / f"{story_key}.md").write_text(
+                "Status: done\n", encoding="utf-8"
+            )
 
         status_path = story_root / "sprint-status.yaml"
         status_path.write_text(
@@ -344,12 +346,18 @@ def test_int_autopilot_story_flow_finalizes_completed_epic_with_retrospective():
 
         sprint_status = yaml.safe_load(status_path.read_text(encoding="utf-8"))
         assert sprint_status["development_status"][f"epic-{epic_id}"] == "done"
-        assert sprint_status["development_status"][f"epic-{epic_id}-retrospective"] == "done"
+        assert (
+            sprint_status["development_status"][f"epic-{epic_id}-retrospective"]
+            == "done"
+        )
         assert runner.state.completed_epics == [epic_id]
         assert transitions[-1] == ("state_set", "FIND_EPIC", None)
         assert prompts
         assert f"Epic id: {epic_id}" in prompts[0]
-        assert "Document the retrospective and return STATUS: RETROSPECTIVE_COMPLETE when done." in prompts[0]
+        assert (
+            "Document the retrospective and return STATUS: RETROSPECTIVE_COMPLETE when done."
+            in prompts[0]
+        )
 
 
 @pytest.mark.integration_p1
@@ -366,10 +374,7 @@ def test_int_autopilot_story_dev_prompt_mentions_prior_review():
             root / "_bmad-output" / "implementation-artifacts" / "sprint-status.yaml"
         )
         review_artifact = (
-            root
-            / "_bmad-outputs"
-            / "review-artifacts"
-            / "qa-review-20260324_080000.md"
+            root / "_bmad-outputs" / "review-artifacts" / "qa-review-20260324_080000.md"
         )
         story_path.parent.mkdir(parents=True, exist_ok=True)
         review_artifact.parent.mkdir(parents=True, exist_ok=True)

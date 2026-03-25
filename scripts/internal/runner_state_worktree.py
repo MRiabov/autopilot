@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
-import subprocess
 from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 from pydantic import ValidationError
@@ -39,12 +36,14 @@ class RunnerStateWorktreeMixin:
 
     def save_state(self) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        write_text(self.state_file, json.dumps(to_jsonable(self.state), indent=2) + "\n")
+        write_text(
+            self.state_file, json.dumps(to_jsonable(self.state), indent=2) + "\n"
+        )
 
     def state_phase(self) -> Phase:
         return self.state.effective_phase
 
-    def state_current_epic(self) -> Optional[str]:
+    def state_current_epic(self) -> str | None:
         return self.state.effective_epic
 
     def state_set(self, phase: Phase | str, epic: str | None = None) -> None:
@@ -61,10 +60,12 @@ class RunnerStateWorktreeMixin:
         self.state.current_story_file = None
         self.save_state()
 
-    def state_current_story(self) -> Optional[str]:
+    def state_current_story(self) -> str | None:
         return self.state.current_story
 
-    def state_set_story(self, phase: Phase | str, story_key: str, story_file: Path | None = None) -> None:
+    def state_set_story(
+        self, phase: Phase | str, story_key: str, story_file: Path | None = None
+    ) -> None:
         phase_value = Phase.from_value(phase)
         epic_id = story_key.split("-", 1)[0] if story_key else None
         if self.state.is_parallel:
@@ -102,23 +103,36 @@ class RunnerStateWorktreeMixin:
         self._rewrite_sprint_status_key(f"epic-{epic_id}", SprintStatusValue.DONE.value)
 
     def mark_epic_retrospective_done(self, epic_id: str) -> None:
-        self._rewrite_sprint_status_key(f"epic-{epic_id}-retrospective", SprintStatusValue.DONE.value)
+        self._rewrite_sprint_status_key(
+            f"epic-{epic_id}-retrospective", SprintStatusValue.DONE.value
+        )
 
     def state_add_pending_pr(self, epic_id: str, pr_number: int, wt_path: str) -> None:
-        self.state.pending_prs = [pr for pr in self.state.pending_prs if pr.epic != epic_id]
+        self.state.pending_prs = [
+            pr for pr in self.state.pending_prs if pr.epic != epic_id
+        ]
         self.state.pending_prs.append(
-            PendingPR(epic=epic_id, pr_number=int(pr_number), worktree=wt_path, status="WAIT_REVIEW", last_check=utc_now(), last_copilot_id=None)
+            PendingPR(
+                epic=epic_id,
+                pr_number=int(pr_number),
+                worktree=wt_path,
+                status="WAIT_REVIEW",
+                last_check=utc_now(),
+                last_copilot_id=None,
+            )
         )
         self.save_state()
         self.debug(f"Added pending PR: epic={epic_id} pr=#{pr_number}")
 
-    def state_get_pending_pr(self, epic_id: str) -> Optional[PendingPR]:
+    def state_get_pending_pr(self, epic_id: str) -> PendingPR | None:
         for pr in self.state.pending_prs:
             if pr.epic == epic_id:
                 return pr
         return None
 
-    def state_update_pending_pr(self, epic_id: str, field_name: str, value: Any) -> None:
+    def state_update_pending_pr(
+        self, epic_id: str, field_name: str, value: Any
+    ) -> None:
         for pr in self.state.pending_prs:
             if pr.epic == epic_id and hasattr(pr, field_name):
                 setattr(pr, field_name, value)
@@ -126,7 +140,9 @@ class RunnerStateWorktreeMixin:
         self.save_state()
 
     def state_remove_pending_pr(self, epic_id: str) -> None:
-        self.state.pending_prs = [pr for pr in self.state.pending_prs if pr.epic != epic_id]
+        self.state.pending_prs = [
+            pr for pr in self.state.pending_prs if pr.epic != epic_id
+        ]
         self.save_state()
         self.debug(f"Removed pending PR: epic={epic_id}")
 
@@ -165,7 +181,9 @@ class RunnerStateWorktreeMixin:
             updated = f"Status: {status_text}\n"
         write_text(story_path, updated if updated.endswith("\n") else updated + "\n")
 
-    def _rewrite_sprint_status_story(self, story_path: Path, story_key: str, status_text: str) -> None:
+    def _rewrite_sprint_status_story(
+        self, story_path: Path, story_key: str, status_text: str
+    ) -> None:
         sprint_status_file = story_path.parent / "sprint-status.yaml"
         if not sprint_status_file.exists():
             return
@@ -216,19 +234,45 @@ class RunnerStateWorktreeMixin:
 
         self.log(f"🌳 Creating worktree for {epic_id} at {wt_path}")
         wt_path.parent.mkdir(parents=True, exist_ok=True)
-        self.run_process(["git", "fetch", "origin", self.base_branch], cwd=self.project_root, check=False)
+        self.run_process(
+            ["git", "fetch", "origin", self.base_branch],
+            cwd=self.project_root,
+            check=False,
+        )
 
         if prefer_existing_branch:
-            add_result = self.run_process(["git", "worktree", "add", str(wt_path), branch_name], cwd=self.project_root, check=False)
+            add_result = self.run_process(
+                ["git", "worktree", "add", str(wt_path), branch_name],
+                cwd=self.project_root,
+                check=False,
+            )
             if add_result.returncode != 0:
                 start_ref = start_point or f"origin/{branch_name}"
-                add_result = self.run_process(["git", "worktree", "add", "-b", branch_name, str(wt_path), start_ref], cwd=self.project_root, check=False)
+                add_result = self.run_process(
+                    [
+                        "git",
+                        "worktree",
+                        "add",
+                        "-b",
+                        branch_name,
+                        str(wt_path),
+                        start_ref,
+                    ],
+                    cwd=self.project_root,
+                    check=False,
+                )
         else:
             start_ref = start_point or f"origin/{self.base_branch}"
-            add_result = self.run_process(["git", "worktree", "add", "-b", branch_name, str(wt_path), start_ref], cwd=self.project_root, check=False)
+            add_result = self.run_process(
+                ["git", "worktree", "add", "-b", branch_name, str(wt_path), start_ref],
+                cwd=self.project_root,
+                check=False,
+            )
 
         if add_result.returncode != 0 or not wt_path.exists():
-            raise RuntimeError(f"Failed to create worktree for {branch_name} at {wt_path}")
+            raise RuntimeError(
+                f"Failed to create worktree for {branch_name} at {wt_path}"
+            )
 
         self.mirror_worktree_support_dirs(wt_path)
         return wt_path
@@ -239,16 +283,26 @@ class RunnerStateWorktreeMixin:
             self.debug(f"Worktree does not exist: {wt_path}")
             return
         self.log(f"🗑️ Removing worktree for {epic_id}")
-        self.run_process(["git", "worktree", "remove", "--force", str(wt_path)], cwd=self.project_root, check=False)
+        self.run_process(
+            ["git", "worktree", "remove", "--force", str(wt_path)],
+            cwd=self.project_root,
+            check=False,
+        )
         if self.state.active_worktree and Path(self.state.active_worktree) == wt_path:
             self.set_active_worktree(None)
 
     def worktree_prune(self) -> None:
         self.log("🧹 Pruning orphaned worktrees...")
-        self.run_process(["git", "worktree", "prune"], cwd=self.project_root, check=False)
+        self.run_process(
+            ["git", "worktree", "prune"], cwd=self.project_root, check=False
+        )
 
     def sync_base_branch(self) -> None:
-        self.run_process(["git", "fetch", "origin", self.base_branch], cwd=self.project_root, check=False)
+        self.run_process(
+            ["git", "fetch", "origin", self.base_branch],
+            cwd=self.project_root,
+            check=False,
+        )
 
     def load_sprint_status(self, root: Path | None = None) -> SprintStatus:
         sprint_status_file = self.sprint_status_path(root)
@@ -262,10 +316,16 @@ class RunnerStateWorktreeMixin:
         try:
             sprint_status = SprintStatus.model_validate(raw)
         except ValidationError as exc:
-            raise ValueError(f"Invalid sprint status YAML: {sprint_status_file}") from exc
+            raise ValueError(
+                f"Invalid sprint status YAML: {sprint_status_file}"
+            ) from exc
 
-        expected_story_root = (root or self.project_root) / "_bmad-output" / "implementation-artifacts"
-        actual_story_root = sprint_status.normalized_story_root(root or self.project_root)
+        expected_story_root = (
+            (root or self.project_root) / "_bmad-output" / "implementation-artifacts"
+        )
+        actual_story_root = sprint_status.normalized_story_root(
+            root or self.project_root
+        )
         if actual_story_root != expected_story_root:
             raise ValueError(
                 "Sprint status story_location does not match the repository implementation-artifacts directory: "
@@ -277,16 +337,26 @@ class RunnerStateWorktreeMixin:
     def epic_matches_patterns(self, epic: str, sprint_status: SprintStatus) -> bool:
         if not self.config.epic_pattern:
             return True
-        story_tokens = " ".join(key for key, _status in sprint_status.epic_story_entries(epic))
+        story_tokens = " ".join(
+            key for key, _status in sprint_status.epic_story_entries(epic)
+        )
         haystack = " ".join([f"epic-{epic}", epic, story_tokens])
-        return any(re.search(pattern, haystack, re.IGNORECASE) for pattern in self.config.epic_pattern.split())
+        return any(
+            re.search(pattern, haystack, re.IGNORECASE)
+            for pattern in self.config.epic_pattern.split()
+        )
 
-    def story_matches_patterns(self, story_key: str, sprint_status: SprintStatus) -> bool:
+    def story_matches_patterns(
+        self, story_key: str, sprint_status: SprintStatus
+    ) -> bool:
         if not self.config.epic_pattern:
             return True
         epic_id = story_key.split("-", 1)[0]
         haystack = " ".join([story_key, f"epic-{epic_id}", epic_id])
-        return any(re.search(pattern, haystack, re.IGNORECASE) for pattern in self.config.epic_pattern.split())
+        return any(
+            re.search(pattern, haystack, re.IGNORECASE)
+            for pattern in self.config.epic_pattern.split()
+        )
 
     def normalize_selection_reference(self, value: str) -> str:
         return value.strip().replace(".", "-")
@@ -297,7 +367,9 @@ class RunnerStateWorktreeMixin:
             return 0
 
         stories = sprint_status.story_entries()
-        story_index_by_key = {story_key: index for index, (story_key, _status) in enumerate(stories)}
+        story_index_by_key = {
+            story_key: index for index, (story_key, _status) in enumerate(stories)
+        }
         if start_from in story_index_by_key:
             return story_index_by_key[start_from]
 
@@ -312,7 +384,9 @@ class RunnerStateWorktreeMixin:
                 if story_key.startswith(story_prefix):
                     return index
 
-        raise ValueError(f"Start-from reference not found in sprint status: {self.config.start_from}")
+        raise ValueError(
+            f"Start-from reference not found in sprint status: {self.config.start_from}"
+        )
 
     def selection_start_epic_index(self, sprint_status: SprintStatus) -> int:
         start_from = self.normalize_selection_reference(self.config.start_from)
@@ -321,7 +395,9 @@ class RunnerStateWorktreeMixin:
 
         epic_match = re.fullmatch(r"(?:epic-)?(\d+)(?:-\d+)?", start_from)
         if not epic_match:
-            raise ValueError(f"Start-from reference is not an epic selector: {self.config.start_from}")
+            raise ValueError(
+                f"Start-from reference is not an epic selector: {self.config.start_from}"
+            )
 
         epic_id = epic_match.group(1)
         active_epics = sprint_status.active_epic_ids()
@@ -329,22 +405,38 @@ class RunnerStateWorktreeMixin:
             if active_epic == epic_id:
                 return index
 
-        raise ValueError(f"Start-from epic not found in active sprint epics: {self.config.start_from}")
+        raise ValueError(
+            f"Start-from epic not found in active sprint epics: {self.config.start_from}"
+        )
 
-    def story_file_for_key(self, sprint_status: SprintStatus, story_key: str, root: Path | None = None) -> Path:
-        return sprint_status.normalized_story_root(root or self.project_root) / f"{story_key}.md"
+    def story_file_for_key(
+        self, sprint_status: SprintStatus, story_key: str, root: Path | None = None
+    ) -> Path:
+        return (
+            sprint_status.normalized_story_root(root or self.project_root)
+            / f"{story_key}.md"
+        )
 
     def select_next_story(self, sprint_status: SprintStatus) -> StoryTarget | None:
         stories = sprint_status.story_entries()
         start_index = self.selection_start_story_index(sprint_status)
 
-        def select_first_matching_story(statuses: set[SprintStatusValue]) -> StoryTarget | None:
+        def select_first_matching_story(
+            statuses: set[SprintStatusValue],
+        ) -> StoryTarget | None:
             for story_key, story_status in stories[start_index:]:
-                if story_status not in statuses or not self.story_matches_patterns(story_key, sprint_status):
+                if story_status not in statuses or not self.story_matches_patterns(
+                    story_key, sprint_status
+                ):
                     continue
                 story_path = self.story_file_for_key(sprint_status, story_key)
-                if story_status != SprintStatusValue.BACKLOG and not story_path.exists():
-                    raise ValueError(f"Missing story file for story {story_key}: {story_path}")
+                if (
+                    story_status != SprintStatusValue.BACKLOG
+                    and not story_path.exists()
+                ):
+                    raise ValueError(
+                        f"Missing story file for story {story_key}: {story_path}"
+                    )
                 return StoryTarget(key=story_key, path=story_path, status=story_status)
             return None
 
@@ -359,7 +451,7 @@ class RunnerStateWorktreeMixin:
                 return target
         return None
 
-    def find_next_epic(self, sprint_status: SprintStatus) -> Optional[str]:
+    def find_next_epic(self, sprint_status: SprintStatus) -> str | None:
         completed = set(self.state.completed_epics)
         pending = {pr.epic for pr in self.state.pending_prs}
         active_epics = sprint_status.active_epic_ids()
@@ -374,16 +466,26 @@ class RunnerStateWorktreeMixin:
         return None
 
     def gh_repo_info(self) -> tuple[str, str]:
-        result = self.run_json(["gh", "repo", "view", "--json", "owner,name"], cwd=self.project_root)
+        result = self.run_json(
+            ["gh", "repo", "view", "--json", "owner,name"], cwd=self.project_root
+        )
         if not result:
             raise RuntimeError("Could not determine repo info")
         return result["owner"]["login"], result["name"]
 
     def gh_pr_view(self, pr_number: int, fields_value: str) -> Any:
-        return self.run_json(["gh", "pr", "view", str(pr_number), "--json", fields_value], cwd=self.project_root, check=False)
+        return self.run_json(
+            ["gh", "pr", "view", str(pr_number), "--json", fields_value],
+            cwd=self.project_root,
+            check=False,
+        )
 
     def gh_pr_checks(self, pr_number: int) -> list[dict[str, Any]]:
-        result = self.run_json(["gh", "pr", "checks", str(pr_number), "--json", "name,conclusion,status"], cwd=self.project_root, check=False)
+        result = self.run_json(
+            ["gh", "pr", "checks", str(pr_number), "--json", "name,conclusion,status"],
+            cwd=self.project_root,
+            check=False,
+        )
         return result if isinstance(result, list) else []
 
     def gh_graphql(self, query: str, **variables: Any) -> dict[str, Any]:
@@ -410,7 +512,13 @@ class RunnerStateWorktreeMixin:
             """
         ).strip()
         data = self.gh_graphql(query, owner=owner, repo=repo, pr=pr_number)
-        nodes = data.get("data", {}).get("repository", {}).get("pullRequest", {}).get("reviewThreads", {}).get("nodes", [])
+        nodes = (
+            data.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+            .get("nodes", [])
+        )
         return sum(1 for node in nodes if not node.get("isResolved"))
 
     def get_unresolved_threads_content(self, pr_number: int) -> str:
@@ -442,7 +550,13 @@ class RunnerStateWorktreeMixin:
             """
         ).strip()
         data = self.gh_graphql(query, owner=owner, repo=repo, pr=pr_number)
-        nodes = data.get("data", {}).get("repository", {}).get("pullRequest", {}).get("reviewThreads", {}).get("nodes", [])
+        nodes = (
+            data.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+            .get("nodes", [])
+        )
 
         parts: list[str] = []
         for thread in nodes:
@@ -455,7 +569,9 @@ class RunnerStateWorktreeMixin:
                 author = comment.get("author", {}).get("login", "unknown")
                 body = comment.get("body", "")
                 comment_lines.append(f"{author}: {body}")
-            parts.append(f"📁 File: {file_path}:{line}\n" + "\n".join(comment_lines) + "\n---")
+            parts.append(
+                f"📁 File: {file_path}:{line}\n" + "\n".join(comment_lines) + "\n---"
+            )
         return "\n".join(parts)
 
     def resolve_pr_review_threads(self, pr_number: int) -> None:
@@ -476,8 +592,18 @@ class RunnerStateWorktreeMixin:
             """
         ).strip()
         data = self.gh_graphql(query, owner=owner, repo=repo, pr=pr_number)
-        nodes = data.get("data", {}).get("repository", {}).get("pullRequest", {}).get("reviewThreads", {}).get("nodes", [])
-        unresolved = [node["id"] for node in nodes if not node.get("isResolved") and node.get("id")]
+        nodes = (
+            data.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads", {})
+            .get("nodes", [])
+        )
+        unresolved = [
+            node["id"]
+            for node in nodes
+            if not node.get("isResolved") and node.get("id")
+        ]
         if not unresolved:
             self.debug("No unresolved review threads found")
             return
@@ -499,7 +625,9 @@ class RunnerStateWorktreeMixin:
         if resolved_count:
             self.log(f"✅ Resolved {resolved_count} review thread(s)")
 
-    def check_pending_pr_status(self, epic_id: str, pr_number: int, worktree: str) -> str:
+    def check_pending_pr_status(
+        self, epic_id: str, pr_number: int, worktree: str
+    ) -> str:
         self.debug(f"Checking PR #{pr_number} for epic {epic_id}")
         pr_info = self.gh_pr_view(pr_number, "state,reviews")
         state = (pr_info or {}).get("state", "").upper()
@@ -511,17 +639,28 @@ class RunnerStateWorktreeMixin:
             return "waiting"
 
         checks = self.gh_pr_checks(pr_number)
-        if any(str(check.get("conclusion", "")).lower() == "failure" for check in checks):
+        if any(
+            str(check.get("conclusion", "")).lower() == "failure" for check in checks
+        ):
             return "needs_fixes"
 
         ci_pending = any(
-            str(check.get("status", "")).lower() != "completed" and str(check.get("conclusion", "")).lower() != "success"
+            str(check.get("status", "")).lower() != "completed"
+            and str(check.get("conclusion", "")).lower() != "success"
             for check in checks
         )
         reviews = (pr_info or {}).get("reviews", []) or []
         approved = any(review.get("state") == "APPROVED" for review in reviews)
-        copilot_reviews = [review for review in reviews if "copilot" in str(review.get("author", {}).get("login", "")).lower()]
-        copilot_reviews.sort(key=lambda review: review.get("submittedAt") or review.get("createdAt") or "")
+        copilot_reviews = [
+            review
+            for review in reviews
+            if "copilot" in str(review.get("author", {}).get("login", "")).lower()
+        ]
+        copilot_reviews.sort(
+            key=lambda review: (
+                review.get("submittedAt") or review.get("createdAt") or ""
+            )
+        )
         if copilot_reviews and copilot_reviews[-1].get("state") == "CHANGES_REQUESTED":
             return "needs_fixes"
 
@@ -532,24 +671,28 @@ class RunnerStateWorktreeMixin:
             return "approved"
         return "waiting"
 
-    def check_all_pending_prs(self) -> Optional[str]:
+    def check_all_pending_prs(self) -> str | None:
         pending_prs = self.state_get_all_pending_prs()
         if not pending_prs:
             self.debug("No pending PRs to check")
             return None
 
         self.log(f"🔍 Checking {len(pending_prs)} pending PR(s)...")
-        pr_to_fix: Optional[str] = None
+        pr_to_fix: str | None = None
         for pr in list(pending_prs):
             status = self.check_pending_pr_status(pr.epic, pr.pr_number, pr.worktree)
             if status == "approved":
-                self.log(f"✅ PR #{pr.pr_number} (epic {pr.epic}) is approved and ready to merge")
+                self.log(
+                    f"✅ PR #{pr.pr_number} (epic {pr.epic}) is approved and ready to merge"
+                )
                 self.handle_approved_pr(pr.epic, pr.pr_number, pr.worktree)
             elif status == "merged":
                 self.log(f"✅ PR #{pr.pr_number} (epic {pr.epic}) was already merged")
                 self.handle_merged_pr(pr.epic, pr.worktree)
             elif status == "closed":
-                self.log(f"⚠️ PR #{pr.pr_number} (epic {pr.epic}) was closed without merge")
+                self.log(
+                    f"⚠️ PR #{pr.pr_number} (epic {pr.epic}) was closed without merge"
+                )
                 self.state_remove_pending_pr(pr.epic)
                 self.worktree_remove(pr.epic)
             elif status == "needs_fixes":
@@ -557,13 +700,22 @@ class RunnerStateWorktreeMixin:
                 if pr_to_fix is None:
                     pr_to_fix = pr.epic
             else:
-                self.debug(f"PR #{pr.pr_number} (epic {pr.epic}) still waiting for review/CI")
+                self.debug(
+                    f"PR #{pr.pr_number} (epic {pr.epic}) still waiting for review/CI"
+                )
                 self.state_update_pending_pr(pr.epic, "last_check", utc_now())
         return pr_to_fix
 
     def handle_approved_pr(self, epic_id: str, pr_number: int, wt_path: str) -> None:
         self.log(f"🔀 Merging approved PR #{pr_number} for epic {epic_id}")
-        if self.run_process(["gh", "pr", "merge", str(pr_number), "--squash", "--delete-branch"], cwd=self.project_root, check=False).returncode == 0:
+        if (
+            self.run_process(
+                ["gh", "pr", "merge", str(pr_number), "--squash", "--delete-branch"],
+                cwd=self.project_root,
+                check=False,
+            ).returncode
+            == 0
+        ):
             self.log(f"✅ PR #{pr_number} merged successfully")
             self.sync_base_branch()
             self.state_remove_pending_pr(epic_id)
@@ -585,7 +737,10 @@ class RunnerStateWorktreeMixin:
         sprint_status_file = self.sprint_status_file
         retro_dir = self.project_root / "_bmad-output" / "implementation-artifacts"
         retro_dir.mkdir(parents=True, exist_ok=True)
-        retro_file = retro_dir / f"epic-{epic_id}-retro-{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        retro_file = (
+            retro_dir
+            / f"epic-{epic_id}-retro-{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        )
         output_file = self.tmp_dir / "retrospective-output.txt"
         self.log(f"🪞 Running retrospective for epic {epic_id}")
         try:
@@ -595,7 +750,9 @@ class RunnerStateWorktreeMixin:
             self.log(f"❌ {exc}")
             return False
         return_code = self.run_codex_exec(
-            self.build_retrospective_prompt(epic_id, story_files, retro_file, sprint_status_file),
+            self.build_retrospective_prompt(
+                epic_id, story_files, retro_file, sprint_status_file
+            ),
             output_file,
             cwd=self.project_root,
         )

@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import json
-import os
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 from textwrap import dedent
-from typing import Any, Optional, Sequence
 
 from .models import Phase, SprintStatusValue, ValidationFailure
-from .utils import read_text, to_jsonable, utc_now, write_text
+from .utils import to_jsonable
 
 
 class StoryFlowPhasesMixin:
@@ -41,7 +36,9 @@ class StoryFlowPhasesMixin:
                 self.state_set(Phase.EPIC_REVIEW, next_epic)
                 return
 
-            self.log("🎉 No more active stories or pending epic retrospectives in sprint-status.yaml")
+            self.log(
+                "🎉 No more active stories or pending epic retrospectives in sprint-status.yaml"
+            )
             self.state_set(Phase.DONE, None)
             return
 
@@ -49,7 +46,10 @@ class StoryFlowPhasesMixin:
         if target.status == SprintStatusValue.BACKLOG:
             self.state_set_story(Phase.CREATE_STORY, target.key, target.path)
             return
-        if target.status in {SprintStatusValue.READY_FOR_DEV, SprintStatusValue.IN_PROGRESS}:
+        if target.status in {
+            SprintStatusValue.READY_FOR_DEV,
+            SprintStatusValue.IN_PROGRESS,
+        }:
             self.mark_story_in_progress(target.key, target.path)
             self.state_set_story(Phase.DEVELOP_STORIES, target.key, target.path)
             return
@@ -126,16 +126,22 @@ class StoryFlowPhasesMixin:
         )
         if return_code != 0:
             self.log("❌ Codex reported create-story failed")
-            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            self.state_set(
+                Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None
+            )
             return
 
         try:
             refreshed = self.load_sprint_status()
             story_status = dict(refreshed.story_entries()).get(story_key)
             if story_status == SprintStatusValue.BACKLOG:
-                self.log(f"⚠️ Story {story_key} is still backlog after create-story; continuing anyway")
+                self.log(
+                    f"⚠️ Story {story_key} is still backlog after create-story; continuing anyway"
+                )
             else:
-                self.log(f"✅ Story {story_key} is now {story_status.value if story_status else 'unknown'}")
+                self.log(
+                    f"✅ Story {story_key} is now {story_status.value if story_status else 'unknown'}"
+                )
         except Exception as exc:
             self.log(f"⚠️ Unable to verify created story status: {exc}")
 
@@ -157,21 +163,32 @@ class StoryFlowPhasesMixin:
                 raise ValueError(f"Missing story entry in sprint status: {story_key}")
             story_path = self.story_file_for_key(sprint_status, story_key)
             if target == SprintStatusValue.REVIEW:
-                self.log(f"⏯️ Story {story_key} is already in review; skipping back to QA")
+                self.log(
+                    f"⏯️ Story {story_key} is already in review; skipping back to QA"
+                )
                 self.state_set_story(Phase.QA_AUTOMATION_TEST, story_key, story_path)
                 return
             if target == SprintStatusValue.DONE:
-                self.log(f"⏯️ Story {story_key} is already done; selecting the next story")
+                self.log(
+                    f"⏯️ Story {story_key} is already done; selecting the next story"
+                )
                 self.state_set(Phase.FIND_EPIC, None)
                 return
             if target != SprintStatusValue.BACKLOG and not story_path.exists():
-                raise ValueError(f"Missing story file for story {story_key}: {story_path}")
+                raise ValueError(
+                    f"Missing story file for story {story_key}: {story_path}"
+                )
         except ValueError as exc:
             self.log(f"❌ {exc}")
             self.reroute_to_development(
                 epic_id=story_key.split("-", 1)[0] if story_key else "",
                 story_key=story_key,
-                story_path=story_path or (Path(self.state.current_story_file) if self.state.current_story_file else None),
+                story_path=story_path
+                or (
+                    Path(self.state.current_story_file)
+                    if self.state.current_story_file
+                    else None
+                ),
                 reason=str(exc),
             )
             return
@@ -179,7 +196,9 @@ class StoryFlowPhasesMixin:
         self.log(f"📄 Sprint status source: {self.sprint_status_file}")
         self.log(f"📄 Story context: {story_path}")
 
-        review_context = self.latest_review_artifact_for_story(story_key, root=self.project_root)
+        review_context = self.latest_review_artifact_for_story(
+            story_key, root=self.project_root
+        )
         review_kind: str | None = None
         review_artifact_path: Path | None = None
         if review_context is not None:
@@ -217,7 +236,9 @@ class StoryFlowPhasesMixin:
             ),
         )
         output_text = result.output_text
-        parsed_output, validation_failure = self.parse_story_dev_output(output_text, expected_story_key=story_key)
+        parsed_output, validation_failure = self.parse_story_dev_output(
+            output_text, expected_story_key=story_key
+        )
         if parsed_output and parsed_output.workflow_status == "stories_blocked":
             self.reroute_development_after_blocked(
                 epic_id=story_key.split("-", 1)[0] if story_key else "",
@@ -229,12 +250,16 @@ class StoryFlowPhasesMixin:
         if result.return_code != 0:
             self.log("❌ Codex reported story development failed")
             if result.validation_failure:
-                self.log(f"   Validation error: {to_jsonable(result.validation_failure)}")
+                self.log(
+                    f"   Validation error: {to_jsonable(result.validation_failure)}"
+                )
             self.reroute_to_development(
                 epic_id=story_key.split("-", 1)[0] if story_key else "",
                 story_key=story_key,
                 story_path=story_path,
-                reason=result.validation_failure.message if result.validation_failure else "story development returned non-zero",
+                reason=result.validation_failure.message
+                if result.validation_failure
+                else "story development returned non-zero",
             )
             return
         if validation_failure or not parsed_output:
@@ -245,7 +270,9 @@ class StoryFlowPhasesMixin:
                 epic_id=story_key.split("-", 1)[0] if story_key else "",
                 story_key=story_key,
                 story_path=story_path,
-                reason=validation_failure.message if validation_failure else "invalid story-development output",
+                reason=validation_failure.message
+                if validation_failure
+                else "invalid story-development output",
             )
             return
 
@@ -294,14 +321,20 @@ class StoryFlowPhasesMixin:
                 raise ValueError(f"Missing story entry in sprint status: {story_key}")
             story_path = self.story_file_for_key(sprint_status, story_key)
             if target == SprintStatusValue.BACKLOG:
-                raise ValueError(f"Story {story_key} is still backlog and cannot run QA")
+                raise ValueError(
+                    f"Story {story_key} is still backlog and cannot run QA"
+                )
             if target == SprintStatusValue.DONE:
-                self.log(f"⏯️ Story {story_key} is already done; selecting the next story")
+                self.log(
+                    f"⏯️ Story {story_key} is already done; selecting the next story"
+                )
                 self.state_set(Phase.FIND_EPIC, None)
                 return
         except ValueError as exc:
             self.log(f"❌ {exc}")
-            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            self.state_set(
+                Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None
+            )
             return
 
         self.log(f"📄 Sprint status source: {self.sprint_status_file}")
@@ -321,13 +354,15 @@ class StoryFlowPhasesMixin:
                 - review_status: pass | fail
                 """
             ).strip(),
-            validator=lambda output_text: None
-            if self.review_status_from_output(output_text) in {"pass", "fail"}
-            else ValidationFailure(
-                error_code="missing_review_status",
-                field="frontmatter.review_status",
-                message="missing YAML frontmatter review_status",
-                expected="review_status: pass | fail",
+            validator=lambda output_text: (
+                None
+                if self.review_status_from_output(output_text) in {"pass", "fail"}
+                else ValidationFailure(
+                    error_code="missing_review_status",
+                    field="frontmatter.review_status",
+                    message="missing YAML frontmatter review_status",
+                    expected="review_status: pass | fail",
+                )
             ),
         )
         output_text = result.output_text
@@ -392,22 +427,32 @@ class StoryFlowPhasesMixin:
                 raise ValueError(f"Missing story entry in sprint status: {story_key}")
             story_path = self.story_file_for_key(sprint_status, story_key)
             if target == SprintStatusValue.DONE:
-                self.log(f"⏯️ Story {story_key} is already done; selecting the next story")
+                self.log(
+                    f"⏯️ Story {story_key} is already done; selecting the next story"
+                )
                 self.state_set(Phase.FIND_EPIC, None)
                 return
             if target == SprintStatusValue.BACKLOG:
-                raise ValueError(f"Story {story_key} is still backlog and cannot be reviewed")
+                raise ValueError(
+                    f"Story {story_key} is still backlog and cannot be reviewed"
+                )
             if target != SprintStatusValue.BACKLOG and not story_path.exists():
-                raise ValueError(f"Missing story file for story {story_key}: {story_path}")
+                raise ValueError(
+                    f"Missing story file for story {story_key}: {story_path}"
+                )
         except ValueError as exc:
             self.log(f"❌ {exc}")
-            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            self.state_set(
+                Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None
+            )
             return
 
         self.log(f"Running BMAD code-review workflow for story {story_key}")
         source = self.collect_review_source_snapshot(self.project_root)
         if not source.has_reviewable_source:
-            blocked_text = "No reviewable source found in the current workspace snapshot."
+            blocked_text = (
+                "No reviewable source found in the current workspace snapshot."
+            )
             self.log(f"❌ {blocked_text}")
             self.persist_review_artifact(
                 "code-review",
@@ -478,12 +523,16 @@ class StoryFlowPhasesMixin:
         if result.return_code != 0:
             self.log("❌ Codex reported code review failed")
             if result.validation_failure:
-                self.log(f"   Validation error: {to_jsonable(result.validation_failure)}")
+                self.log(
+                    f"   Validation error: {to_jsonable(result.validation_failure)}"
+                )
             self.reroute_to_development(
                 epic_id=story_key.split("-", 1)[0] if story_key else "",
                 story_key=story_key,
                 story_path=story_path,
-                reason=result.validation_failure.message if result.validation_failure else "code review returned non-zero",
+                reason=result.validation_failure.message
+                if result.validation_failure
+                else "code review returned non-zero",
             )
             return
         if validation_failure or not parsed_output:
@@ -494,7 +543,9 @@ class StoryFlowPhasesMixin:
                 epic_id=story_key.split("-", 1)[0] if story_key else "",
                 story_key=story_key,
                 story_path=story_path,
-                reason=validation_failure.message if validation_failure else "invalid code-review output",
+                reason=validation_failure.message
+                if validation_failure
+                else "invalid code-review output",
             )
             return
         self.persist_review_artifact(
@@ -534,7 +585,9 @@ class StoryFlowPhasesMixin:
             self.mark_story_done(story_key, story_path)
         except Exception as exc:
             self.log(f"❌ Failed to mark story done: {exc}")
-            self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+            self.state_set(
+                Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None
+            )
             return
 
         self.play_sound("review_complete")

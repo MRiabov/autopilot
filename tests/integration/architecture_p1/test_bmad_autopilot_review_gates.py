@@ -327,7 +327,10 @@ def test_int_autopilot_accept_dirty_worktree_skips_prompt(monkeypatch):
 
     runner.confirm_dirty_worktree(Path("/tmp"), context="story flow")
 
-    assert any("Dirty worktree accepted via --accept-dirty-worktree." in line for line in messages)
+    assert any(
+        "Dirty worktree accepted via --accept-dirty-worktree." in line
+        for line in messages
+    )
     assert not any("Continue anyway?" in line for line in messages)
 
 
@@ -939,7 +942,9 @@ def test_int_autopilot_codex_json_events_are_logged_as_structlog():
                 runner.tmp_dir.mkdir(parents=True, exist_ok=True)
                 runner.config = mod.RuntimeConfig()
                 runner.codex_reasoning_effort = "high"
-                runner.codex_switcher = SimpleNamespace(maybe_switch=lambda *_args, **_kwargs: None)
+                runner.codex_switcher = SimpleNamespace(
+                    maybe_switch=lambda *_args, **_kwargs: None
+                )
 
                 messages: list[str] = []
                 runner.log = lambda message: messages.append(str(message))
@@ -949,35 +954,35 @@ def test_int_autopilot_codex_json_events_are_logged_as_structlog():
                 )
 
                 assert result.return_code == 0
-                assert any("event=\"item.started\"" in line for line in messages)
+                assert any('event="item.started"' in line for line in messages)
                 assert any(
-                    "event=\"item.started\"" in line
-                    and "sender=\"tool\"" in line
+                    'event="item.started"' in line
+                    and 'sender="tool"' in line
                     and "step=718" in line
-                    and "item_type=\"command_execution\"" in line
-                    and "content=\"/bin/bash -lc" in line
+                    and 'item_type="command_execution"' in line
+                    and 'content="/bin/bash -lc' in line
                     for line in messages
                 )
                 assert any(
-                    "event=\"item.completed\"" in line
-                    and "sender=\"assistant\"" in line
+                    'event="item.completed"' in line
+                    and 'sender="assistant"' in line
                     and "step=719" in line
-                    and "item_type=\"agent_message\"" in line
-                    and "content=\"done\"" in line
+                    and 'item_type="agent_message"' in line
+                    and 'content="done"' in line
                     for line in messages
                 )
                 assert any(
-                    "event=\"item.completed\"" in line
-                    and "sender=\"tool\"" in line
+                    'event="item.completed"' in line
+                    and 'sender="tool"' in line
                     and "step=720" in line
-                    and "item_type=\"file_change\"" in line
-                    and "content=\"src/example.py\"" in line
+                    and 'item_type="file_change"' in line
+                    and 'content="src/example.py"' in line
                     for line in messages
                 )
                 assert any(
-                    "event=\"session.completed\"" in line
-                    and "session_id=\"session-1\"" in line
-                    and "status=\"ok\"" in line
+                    'event="session.completed"' in line
+                    and 'session_id="session-1"' in line
+                    and 'status="ok"' in line
                     and "payload=" in line
                     for line in messages
                 )

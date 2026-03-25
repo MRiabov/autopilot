@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[4]
 STATUS_SCRIPT = REPO_ROOT / ".autopilot" / "scripts" / "status.py"
 
@@ -110,9 +109,9 @@ def test_int_autopilot_status_reports_only_the_last_run_slice():
         assert (
             'event="item.completed" sender="assistant" step=719 '
             'item_type="agent_message" item_id="item_719" content="done" '
-            '(2-4-review-peer-solutions-for-stability)'
+            "(2-4-review-peer-solutions-for-stability)"
         ) in output
         assert (
             'event="session.completed" session_id="session-1" status="ok" '
-            '(2-4-review-peer-solutions-for-stability)'
+            "(2-4-review-peer-solutions-for-stability)"
         ) in output

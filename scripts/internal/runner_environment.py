@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import math
@@ -8,56 +7,23 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 import wave
-from datetime import datetime, timezone
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from textwrap import dedent
-from typing import Any, Callable, Sequence
+from typing import Any
 
 import yaml
-from pydantic import ValidationError
 
-from internal.cockpit import (
-    CockpitCodexSwitcher,
-    cockpit_data_dir_candidates,
-    extract_cockpit_quota_metrics,
-    load_cockpit_codex_store,
-    metric_above_threshold,
-    metric_crossed_threshold,
-    metric_margin_over_threshold,
-    normalize_api_base_url,
-    normalize_bool,
-    normalize_int,
-    normalize_text,
-    pick_best_cockpit_switch_candidate,
-    resolve_cockpit_current_account,
-)
 from internal.models import (
     CodexAttemptResult,
-    CockpitCodexAccount,
-    CockpitCodexQuota,
-    CockpitCodexStoreSnapshot,
-    CockpitCodexSwitchCandidate,
-    CockpitCodexSwitchSettings,
-    CockpitCodexTokens,
-    EpicDevOutput,
-    PausedContext,
-    PendingPR,
-    Phase,
-    ReviewDecisionOutput,
     ReviewSourceSnapshot,
     RuntimeConfig,
-    SprintStatus,
-    SprintStatusValue,
-    StoryDevOutput,
-    StoryTarget,
     ValidationFailure,
-    AutopilotState,
 )
-from internal.utils import read_text, timestamp, to_jsonable, utc_now, write_text
+from internal.utils import read_text, timestamp, to_jsonable
 
 
 class RunnerEnvironmentMixin:
@@ -66,7 +32,13 @@ class RunnerEnvironmentMixin:
     sound_profiles: dict[str, list[tuple[float, float]]] = {
         "quota": [(880.0, 0.14), (660.0, 0.14), (440.0, 0.26)],
         "review_ready": [(659.25, 0.12), (783.99, 0.12), (1046.50, 0.20)],
-        "review_complete": [(523.25, 0.10), (659.25, 0.10), (783.99, 0.10), (1046.50, 0.14), (1318.51, 0.26)],
+        "review_complete": [
+            (523.25, 0.10),
+            (659.25, 0.10),
+            (783.99, 0.10),
+            (1046.50, 0.14),
+            (1318.51, 0.26),
+        ],
     }
 
     worktree_mirror_paths: tuple[Path, ...] = (
@@ -116,12 +88,23 @@ class RunnerEnvironmentMixin:
             return Path.cwd()
 
     def default_worktree_dir(self) -> Path:
-        repo_digest = hashlib.sha1(str(self.project_root).encode("utf-8")).hexdigest()[:10]
-        return Path(tempfile.gettempdir()) / "bmad-autopilot" / f"{self.project_root.name}-{repo_digest}"
+        repo_digest = hashlib.sha1(str(self.project_root).encode("utf-8")).hexdigest()[
+            :10
+        ]
+        return (
+            Path(tempfile.gettempdir())
+            / "bmad-autopilot"
+            / f"{self.project_root.name}-{repo_digest}"
+        )
 
     def sprint_status_path(self, root: Path | None = None) -> Path:
         base_root = root or self.project_root
-        return base_root / "_bmad-output" / "implementation-artifacts" / "sprint-status.yaml"
+        return (
+            base_root
+            / "_bmad-output"
+            / "implementation-artifacts"
+            / "sprint-status.yaml"
+        )
 
     def epic_workspace_root(self, epic_id: str | None = None) -> Path:
         if epic_id:
@@ -142,7 +125,9 @@ class RunnerEnvironmentMixin:
         return self.project_root
 
     def confirm_dirty_worktree(self, root: Path, *, context: str) -> None:
-        dirty = self.run_text(["git", "status", "--short"], cwd=root, check=False, capture_output=True).strip()
+        dirty = self.run_text(
+            ["git", "status", "--short"], cwd=root, check=False, capture_output=True
+        ).strip()
         if not dirty:
             return
         self.log("⚠️ WARNING: Git working tree has uncommitted changes")
@@ -157,7 +142,9 @@ class RunnerEnvironmentMixin:
         try:
             answer = input("Continue anyway? [y/N] ").strip().lower()
         except EOFError:
-            self.log("Aborted: dirty working tree requires explicit yes/no confirmation.")
+            self.log(
+                "Aborted: dirty working tree requires explicit yes/no confirmation."
+            )
             raise SystemExit(1)
         if answer not in {"y", "yes"}:
             self.log("Aborted by user.")
@@ -184,16 +171,53 @@ class RunnerEnvironmentMixin:
                 kept_lines.append(line)
             return "\n".join(kept_lines)
 
-        current_branch = self.run_text(["git", "branch", "--show-current"], cwd=repo_root, check=False, capture_output=True).strip()
-        branch_diff = filter_internal_paths(self.run_text(["git", "diff", "--name-only", f"origin/{base_branch}..HEAD"], cwd=repo_root, check=False, capture_output=True))
-        staged_diff = filter_internal_paths(self.run_text(["git", "diff", "--name-only", "--cached"], cwd=repo_root, check=False, capture_output=True))
-        unstaged_diff = filter_internal_paths(self.run_text(["git", "diff", "--name-only"], cwd=repo_root, check=False, capture_output=True))
-        working_tree_status = filter_internal_paths(self.run_text(["git", "status", "--short"], cwd=repo_root, check=False, capture_output=True))
-        working_tree_status = "\n".join(
-            line for line in working_tree_status.splitlines()
-            if not line.startswith("?? .autopilot/") and not line.startswith("?? .autopilot")
+        current_branch = self.run_text(
+            ["git", "branch", "--show-current"],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+        ).strip()
+        branch_diff = filter_internal_paths(
+            self.run_text(
+                ["git", "diff", "--name-only", f"origin/{base_branch}..HEAD"],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+            )
         )
-        has_reviewable_source = bool(branch_diff.strip() or staged_diff.strip() or unstaged_diff.strip())
+        staged_diff = filter_internal_paths(
+            self.run_text(
+                ["git", "diff", "--name-only", "--cached"],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+            )
+        )
+        unstaged_diff = filter_internal_paths(
+            self.run_text(
+                ["git", "diff", "--name-only"],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+            )
+        )
+        working_tree_status = filter_internal_paths(
+            self.run_text(
+                ["git", "status", "--short"],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+            )
+        )
+        working_tree_status = "\n".join(
+            line
+            for line in working_tree_status.splitlines()
+            if not line.startswith("?? .autopilot/")
+            and not line.startswith("?? .autopilot")
+        )
+        has_reviewable_source = bool(
+            branch_diff.strip() or staged_diff.strip() or unstaged_diff.strip()
+        )
         return ReviewSourceSnapshot(
             current_branch=current_branch,
             branch_diff=branch_diff,
@@ -222,7 +246,9 @@ class RunnerEnvironmentMixin:
                 os.symlink(source, destination, target_is_directory=source.is_dir())
             except OSError:
                 if source.is_dir():
-                    shutil.copytree(source, destination, symlinks=True, dirs_exist_ok=True)
+                    shutil.copytree(
+                        source, destination, symlinks=True, dirs_exist_ok=True
+                    )
                 else:
                     shutil.copy2(source, destination)
 
@@ -244,9 +270,19 @@ class RunnerEnvironmentMixin:
         except subprocess.CalledProcessError:
             pass
 
-        if self.run_git(["show-ref", "--verify", "--quiet", "refs/heads/main"], check=False).returncode == 0:
+        if (
+            self.run_git(
+                ["show-ref", "--verify", "--quiet", "refs/heads/main"], check=False
+            ).returncode
+            == 0
+        ):
             return "main"
-        if self.run_git(["show-ref", "--verify", "--quiet", "refs/heads/master"], check=False).returncode == 0:
+        if (
+            self.run_git(
+                ["show-ref", "--verify", "--quiet", "refs/heads/master"], check=False
+            ).returncode
+            == 0
+        ):
             return "master"
         return "main"
 
@@ -274,8 +310,14 @@ class RunnerEnvironmentMixin:
         def env_or_file(key: str, default: str) -> str:
             return os.environ.get(key, file_values.get(key, default))
 
-        debug_mode = self.args.debug or self.to_bool(env_or_file("AUTOPILOT_DEBUG", "0"))
-        verbose_mode = self.args.verbose or self.to_bool(env_or_file("AUTOPILOT_VERBOSE", "0")) or debug_mode
+        debug_mode = self.args.debug or self.to_bool(
+            env_or_file("AUTOPILOT_DEBUG", "0")
+        )
+        verbose_mode = (
+            self.args.verbose
+            or self.to_bool(env_or_file("AUTOPILOT_VERBOSE", "0"))
+            or debug_mode
+        )
 
         return RuntimeConfig(
             epic_pattern=self.args.epic_pattern or "",
@@ -288,18 +330,32 @@ class RunnerEnvironmentMixin:
             check_interval=self.to_int(env_or_file("CHECK_INTERVAL", "30"), 30),
             max_check_wait=self.to_int(env_or_file("MAX_CHECK_WAIT", "60"), 60),
             max_copilot_wait=self.to_int(env_or_file("MAX_COPILOT_WAIT", "60"), 60),
-            run_mobile_native=self.to_bool(env_or_file("AUTOPILOT_RUN_MOBILE_NATIVE", "0")),
+            run_mobile_native=self.to_bool(
+                env_or_file("AUTOPILOT_RUN_MOBILE_NATIVE", "0")
+            ),
             parallel_mode=self.to_int(env_or_file("PARALLEL_MODE", "0"), 0),
-            parallel_check_interval=self.to_int(env_or_file("PARALLEL_CHECK_INTERVAL", "60"), 60),
+            parallel_check_interval=self.to_int(
+                env_or_file("PARALLEL_CHECK_INTERVAL", "60"), 60
+            ),
             max_pending_prs=self.to_int(env_or_file("MAX_PENDING_PRS", "2"), 2),
             base_branch=env_or_file("AUTOPILOT_BASE_BRANCH", ""),
-            codex_switch_mode=env_or_file("AUTOPILOT_CODEX_SWITCH_MODE", "auto").strip().lower() or "auto",
-            codex_switch_primary_threshold=self.to_int(env_or_file("AUTOPILOT_CODEX_SWITCH_PRIMARY_THRESHOLD", "20"), 20),
-            codex_switch_secondary_threshold=self.to_int(env_or_file("AUTOPILOT_CODEX_SWITCH_SECONDARY_THRESHOLD", "20"), 20),
+            codex_switch_mode=env_or_file("AUTOPILOT_CODEX_SWITCH_MODE", "auto")
+            .strip()
+            .lower()
+            or "auto",
+            codex_switch_primary_threshold=self.to_int(
+                env_or_file("AUTOPILOT_CODEX_SWITCH_PRIMARY_THRESHOLD", "20"), 20
+            ),
+            codex_switch_secondary_threshold=self.to_int(
+                env_or_file("AUTOPILOT_CODEX_SWITCH_SECONDARY_THRESHOLD", "20"), 20
+            ),
             cockpit_data_dir=env_or_file("AUTOPILOT_COCKPIT_DATA_DIR", ""),
             accept_dirty_worktree=bool(self.args.accept_dirty_worktree),
             quota_retry_seconds=self.to_int(
-                env_or_file("AUTOPILOT_QUOTA_RETRY_SECONDS", env_or_file("AUTOPILOT_DEVELOPMENT_BLOCKED_RETRY_SECONDS", "1800")),
+                env_or_file(
+                    "AUTOPILOT_QUOTA_RETRY_SECONDS",
+                    env_or_file("AUTOPILOT_DEVELOPMENT_BLOCKED_RETRY_SECONDS", "1800"),
+                ),
                 1800,
             ),
         )
@@ -386,7 +442,9 @@ class RunnerEnvironmentMixin:
             raise RuntimeError(stderr or stdout or "command failed")
         return result
 
-    def run_json(self, command: Sequence[str], *, cwd: Path | None = None, check: bool = True) -> Any:
+    def run_json(
+        self, command: Sequence[str], *, cwd: Path | None = None, check: bool = True
+    ) -> Any:
         result = self.run_process(command, cwd=cwd, check=check, capture_output=True)
         output = (result.stdout or "").strip()
         if not output:
@@ -401,7 +459,9 @@ class RunnerEnvironmentMixin:
         check: bool = True,
         capture_output: bool = True,
     ) -> str:
-        result = self.run_process(command, cwd=cwd, check=check, capture_output=capture_output)
+        result = self.run_process(
+            command, cwd=cwd, check=check, capture_output=capture_output
+        )
         return result.stdout or ""
 
     def run_git(
@@ -413,7 +473,13 @@ class RunnerEnvironmentMixin:
         capture_output: bool = False,
         input_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        return self.run_process(["git", *args], cwd=cwd, check=check, capture_output=capture_output, input_text=input_text)
+        return self.run_process(
+            ["git", *args],
+            cwd=cwd,
+            check=check,
+            capture_output=capture_output,
+            input_text=input_text,
+        )
 
     def run_streaming_command(
         self,
@@ -477,8 +543,12 @@ class RunnerEnvironmentMixin:
         frames = bytearray()
         for frequency, duration in notes:
             note_samples = max(1, int(sample_rate * duration))
-            attack_samples = max(1, min(note_samples // 4, int(sample_rate * attack_seconds)))
-            release_samples = max(1, min(note_samples // 4, int(sample_rate * release_seconds)))
+            attack_samples = max(
+                1, min(note_samples // 4, int(sample_rate * attack_seconds))
+            )
+            release_samples = max(
+                1, min(note_samples // 4, int(sample_rate * release_seconds))
+            )
 
             for sample_index in range(note_samples):
                 if sample_index < attack_samples:
@@ -488,7 +558,12 @@ class RunnerEnvironmentMixin:
                 else:
                     envelope = 1.0
 
-                sample = int(32767 * amplitude * envelope * math.sin(2.0 * math.pi * frequency * (sample_index / sample_rate)))
+                sample = int(
+                    32767
+                    * amplitude
+                    * envelope
+                    * math.sin(2.0 * math.pi * frequency * (sample_index / sample_rate))
+                )
                 frames.extend(sample.to_bytes(2, byteorder="little", signed=True))
 
             gap_samples = int(sample_rate * gap_seconds)
@@ -511,7 +586,14 @@ class RunnerEnvironmentMixin:
         if shutil.which("afplay"):
             return ["afplay", str(sound_path)]
         if shutil.which("ffplay"):
-            return ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", str(sound_path)]
+            return [
+                "ffplay",
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "quiet",
+                str(sound_path),
+            ]
         if shutil.which("play"):
             return ["play", "-q", str(sound_path)]
         return None
@@ -524,14 +606,22 @@ class RunnerEnvironmentMixin:
             command = self._sound_player_command(sound_path)
             if not command:
                 return
-            subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
         except Exception as exc:
             self.verbose(f"⚠️ Sound notification failed for {sound_name}: {exc}")
 
     @staticmethod
     def _looks_like_quota_exhaustion(output_text: str) -> bool:
         text = output_text.lower()
-        patterns = (r"\bquota\b", r"out of credits", r"insufficient credits?", r"rate limit exceeded", r"billing")
+        patterns = (
+            r"\bquota\b",
+            r"out of credits",
+            r"insufficient credits?",
+            r"rate limit exceeded",
+            r"billing",
+        )
         return any(re.search(pattern, text) for pattern in patterns)
 
     def run_codex_exec(
@@ -542,7 +632,9 @@ class RunnerEnvironmentMixin:
         cwd: Path | None = None,
         reasoning_effort: str | None = None,
     ) -> int:
-        return self.run_codex_session(prompt, output_file=output_file, cwd=cwd, reasoning_effort=reasoning_effort).return_code
+        return self.run_codex_session(
+            prompt, output_file=output_file, cwd=cwd, reasoning_effort=reasoning_effort
+        ).return_code
 
     @staticmethod
     def format_codex_event(event: Any) -> str | None:
@@ -606,7 +698,17 @@ class RunnerEnvironmentMixin:
             return "codex"
 
         def item_content(item: dict[str, Any]) -> str | None:
-            for key in ("text", "content", "command", "path", "file_path", "aggregated_output", "output", "message", "delta"):
+            for key in (
+                "text",
+                "content",
+                "command",
+                "path",
+                "file_path",
+                "aggregated_output",
+                "output",
+                "message",
+                "delta",
+            ):
                 value = item.get(key)
                 if isinstance(value, str):
                     cleaned = value.strip()
@@ -670,12 +772,18 @@ class RunnerEnvironmentMixin:
         return render_structlog(fields)
 
     @staticmethod
-    def format_prompt_preview(prompt: str, *, max_lines: int = 16, max_line_width: int = 120) -> str:
+    def format_prompt_preview(
+        prompt: str, *, max_lines: int = 16, max_line_width: int = 120
+    ) -> str:
         lines = prompt.splitlines()
         preview_lines = lines[:max_lines]
         rendered = ["Prompt preview:"]
         for index, line in enumerate(preview_lines, start=1):
-            clipped = line if len(line) <= max_line_width else line[: max_line_width - 3] + "..."
+            clipped = (
+                line
+                if len(line) <= max_line_width
+                else line[: max_line_width - 3] + "..."
+            )
             rendered.append(f"  {index:02d}| {clipped}")
         if len(lines) > max_lines:
             rendered.append(f"  ... ({len(lines) - max_lines} more line(s))")
@@ -751,7 +859,10 @@ class RunnerEnvironmentMixin:
                         self.log(pretty)
                     else:
                         print(line, end="")
-                    if isinstance(event, dict) and event.get("type") == "thread.started":
+                    if (
+                        isinstance(event, dict)
+                        and event.get("type") == "thread.started"
+                    ):
                         event_thread_id = event.get("thread_id")
                         if isinstance(event_thread_id, str) and event_thread_id.strip():
                             thread_id = event_thread_id.strip()
@@ -761,13 +872,17 @@ class RunnerEnvironmentMixin:
             output_text = read_text(effective_output_file)
             if returncode != 0 and self._looks_like_quota_exhaustion(output_text):
                 self.play_sound("quota")
-                self.log("⚠️ Codex quota exhausted; switching accounts or waiting for quota to restore")
+                self.log(
+                    "⚠️ Codex quota exhausted; switching accounts or waiting for quota to restore"
+                )
                 if quota_retry_seconds > 0:
                     self.log(f"⏳ Retrying Codex after {quota_retry_seconds} seconds")
                     time.sleep(quota_retry_seconds)
                 continue
 
-            return CodexAttemptResult(return_code=returncode, thread_id=thread_id, output_text=output_text)
+            return CodexAttemptResult(
+                return_code=returncode, thread_id=thread_id, output_text=output_text
+            )
 
     def run_codex_session_with_retry(
         self,
@@ -850,8 +965,9 @@ class RunnerEnvironmentMixin:
     ) -> str:
         failure_yaml = yaml.safe_dump(to_jsonable(failure), sort_keys=False).strip()
         previous_output = previous_output.strip() or "(empty)"
-        return dedent(
-            f"""
+        return (
+            dedent(
+                f"""
             Retry attempt {attempt} of {max_attempts} for {phase_name}.
 
             Validation failure:
@@ -863,4 +979,6 @@ class RunnerEnvironmentMixin:
             Fix only the structured output contract for the same task and workspace context.
             {contract}
             """
-        ).strip() + "\n"
+            ).strip()
+            + "\n"
+        )

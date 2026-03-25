@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -31,7 +30,9 @@ class RunnerUpdateMixin:
             updated = f"Status: {status_text}\n"
         write_text(story_path, updated if updated.endswith("\n") else updated + "\n")
 
-    def _rewrite_sprint_status(self, story_path: Path, story_key: str, status_text: str) -> None:
+    def _rewrite_sprint_status(
+        self, story_path: Path, story_key: str, status_text: str
+    ) -> None:
         sprint_status_file = story_path.parent / "sprint-status.yaml"
         if not sprint_status_file.exists():
             return
@@ -97,18 +98,53 @@ class RunnerUpdateMixin:
     def autopilot_checks(self, root: Path | None = None) -> None:
         check_root = root or self.project_root
         candidates = [
-            self.project_root / ".autopilot" / "scripts" / "internal" / "runner_core.py",
-            self.project_root / ".autopilot" / "scripts" / "internal" / "runner_story_phases.py",
-            self.project_root / ".autopilot" / "scripts" / "internal" / "runner_legacy_workflow_phases.py",
-            self.project_root / ".autopilot" / "scripts" / "internal" / "runner_legacy_pr_phases.py",
-            self.project_root / ".autopilot" / "scripts" / "internal" / "runner_review.py",
-            self.project_root / ".autopilot" / "scripts" / "internal" / "runner_state_worktree.py",
-            self.project_root / ".autopilot" / "scripts" / "internal" / "runner_update.py",
-            self.project_root / ".autopilot" / "scripts" / "internal" / "runner_environment.py",
+            self.project_root
+            / ".autopilot"
+            / "scripts"
+            / "internal"
+            / "runner_core.py",
+            self.project_root
+            / ".autopilot"
+            / "scripts"
+            / "internal"
+            / "runner_story_phases.py",
+            self.project_root
+            / ".autopilot"
+            / "scripts"
+            / "internal"
+            / "runner_legacy_workflow_phases.py",
+            self.project_root
+            / ".autopilot"
+            / "scripts"
+            / "internal"
+            / "runner_legacy_pr_phases.py",
+            self.project_root
+            / ".autopilot"
+            / "scripts"
+            / "internal"
+            / "runner_review.py",
+            self.project_root
+            / ".autopilot"
+            / "scripts"
+            / "internal"
+            / "runner_state_worktree.py",
+            self.project_root
+            / ".autopilot"
+            / "scripts"
+            / "internal"
+            / "runner_update.py",
+            self.project_root
+            / ".autopilot"
+            / "scripts"
+            / "internal"
+            / "runner_environment.py",
         ]
         existing = [str(path) for path in candidates if path.exists()]
         if not existing:
-            self.verbose(f"Skipping autopilot checks for {check_root}: no local check targets found.")
+            self.verbose(
+                f"Skipping autopilot checks for {check_root}: no local check targets found."
+            )
             return
-        self.run_process(["python3", "-m", "py_compile", *existing], cwd=check_root, check=True)
-
+        self.run_process(
+            ["python3", "-m", "py_compile", *existing], cwd=check_root, check=True
+        )

@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from textwrap import dedent
 
-from .models import Phase, SprintStatusValue, ValidationFailure
+from .models import Phase, ValidationFailure
 from .utils import read_text, to_jsonable
 
 
@@ -27,10 +27,16 @@ class LegacyWorkflowPhasesMixin:
         workspace_root = self.epic_workspace_root(epic_id)
         sprint_status_file = self.sprint_status_path(workspace_root)
 
-        if self.run_text(["git", "status", "--porcelain"], cwd=workspace_root, check=False).strip():
+        if self.run_text(
+            ["git", "status", "--porcelain"], cwd=workspace_root, check=False
+        ).strip():
             self.log("⚠️ Git working tree not clean - committing pending changes first")
             self.run_process(["git", "add", "-A"], cwd=workspace_root, check=False)
-            self.run_process(["git", "commit", "-m", "chore: auto-commit before story development"], cwd=workspace_root, check=False)
+            self.run_process(
+                ["git", "commit", "-m", "chore: auto-commit before story development"],
+                cwd=workspace_root,
+                check=False,
+            )
 
         try:
             sprint_status = self.load_sprint_status(root=workspace_root)
@@ -76,7 +82,9 @@ class LegacyWorkflowPhasesMixin:
         )
 
         output_text = result.output_text
-        parsed_output, validation_failure = self.parse_epic_dev_output(output_text, expected_epic_id=epic_id)
+        parsed_output, validation_failure = self.parse_epic_dev_output(
+            output_text, expected_epic_id=epic_id
+        )
         if parsed_output and parsed_output.workflow_status == "stories_blocked":
             self.reroute_development_after_blocked(
                 epic_id=epic_id,
@@ -86,10 +94,14 @@ class LegacyWorkflowPhasesMixin:
         if result.return_code != 0:
             self.log("❌ Codex reported stories blocked")
             if result.validation_failure:
-                self.log(f"   Validation error: {to_jsonable(result.validation_failure)}")
+                self.log(
+                    f"   Validation error: {to_jsonable(result.validation_failure)}"
+                )
             self.reroute_to_development(
                 epic_id=epic_id,
-                reason=result.validation_failure.message if result.validation_failure else "epic development returned non-zero",
+                reason=result.validation_failure.message
+                if result.validation_failure
+                else "epic development returned non-zero",
             )
             return
         if validation_failure or not parsed_output:
@@ -98,12 +110,17 @@ class LegacyWorkflowPhasesMixin:
                 self.log(f"   Validation error: {to_jsonable(validation_failure)}")
             self.reroute_to_development(
                 epic_id=epic_id,
-                reason=validation_failure.message if validation_failure else "invalid stories-development output",
+                reason=validation_failure.message
+                if validation_failure
+                else "invalid stories-development output",
             )
             return
         if parsed_output.workflow_status != "stories_complete":
             self.log("❌ Codex did not report stories_complete")
-            self.reroute_to_development(epic_id=epic_id, reason=f"unexpected workflow_status: {parsed_output.workflow_status}")
+            self.reroute_to_development(
+                epic_id=epic_id,
+                reason=f"unexpected workflow_status: {parsed_output.workflow_status}",
+            )
             return
 
         self.log("Running local checks gate...")
@@ -130,14 +147,20 @@ class LegacyWorkflowPhasesMixin:
                 sprint_status = self.load_sprint_status()
                 target = dict(sprint_status.story_entries()).get(story_key)
                 if target is None:
-                    raise ValueError(f"Missing story entry in sprint status: {story_key}")
+                    raise ValueError(
+                        f"Missing story entry in sprint status: {story_key}"
+                    )
                 story_path = self.story_file_for_key(sprint_status, story_key)
             except ValueError as exc:
                 self.log(f"❌ {exc}")
-                self.state_set(Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None)
+                self.state_set(
+                    Phase.BLOCKED, story_key.split("-", 1)[0] if story_key else None
+                )
                 return
 
-            prompt = self.build_commit_split_prompt(story_key=story_key, story_path=story_path)
+            prompt = self.build_commit_split_prompt(
+                story_key=story_key, story_path=story_path
+            )
             after_split_state = (Phase.QA_AUTOMATION_TEST, story_key, story_path)
             commit_root = self.project_root
         else:
@@ -150,13 +173,17 @@ class LegacyWorkflowPhasesMixin:
             workspace_root = self.epic_workspace_root(epic_id)
             try:
                 sprint_status = self.load_sprint_status(root=workspace_root)
-                story_files = sprint_status.story_files_for_epic(workspace_root, epic_id)
+                story_files = sprint_status.story_files_for_epic(
+                    workspace_root, epic_id
+                )
             except ValueError as exc:
                 self.log(f"❌ {exc}")
                 self.state_set(Phase.BLOCKED, epic_id)
                 return
 
-            prompt = self.build_commit_split_prompt(epic_id=epic_id, story_files=story_files, repo_root=workspace_root)
+            prompt = self.build_commit_split_prompt(
+                epic_id=epic_id, story_files=story_files, repo_root=workspace_root
+            )
             after_split_state = (Phase.QA_AUTOMATION_TEST, epic_id, None)
             commit_root = workspace_root
 
@@ -209,7 +236,9 @@ class LegacyWorkflowPhasesMixin:
 
         output_file = self.tmp_dir / "qa-automation-output.txt"
         result = self.run_codex_session_with_retry(
-            initial_prompt=self.build_qa_prompt(epic_id, sprint_status, story_files, repo_root=workspace_root),
+            initial_prompt=self.build_qa_prompt(
+                epic_id, sprint_status, story_files, repo_root=workspace_root
+            ),
             output_file=output_file,
             cwd=workspace_root,
             reasoning_effort=self.codex_reasoning_effort,
@@ -221,13 +250,15 @@ class LegacyWorkflowPhasesMixin:
                 - review_status: pass | fail
                 """
             ).strip(),
-            validator=lambda output_text: None
-            if self.review_status_from_output(output_text) in {"pass", "fail"}
-            else ValidationFailure(
-                error_code="missing_review_status",
-                field="frontmatter.review_status",
-                message="missing YAML frontmatter review_status",
-                expected="review_status: pass | fail",
+            validator=lambda output_text: (
+                None
+                if self.review_status_from_output(output_text) in {"pass", "fail"}
+                else ValidationFailure(
+                    error_code="missing_review_status",
+                    field="frontmatter.review_status",
+                    message="missing YAML frontmatter review_status",
+                    expected="review_status: pass | fail",
+                )
             ),
         )
 
@@ -251,11 +282,15 @@ class LegacyWorkflowPhasesMixin:
         if result.validation_failure:
             self.log("❌ Codex reported QA validation blocked")
             self.log(f"   Validation error: {to_jsonable(result.validation_failure)}")
-            self.reroute_to_development(epic_id=epic_id, reason=result.validation_failure.message)
+            self.reroute_to_development(
+                epic_id=epic_id, reason=result.validation_failure.message
+            )
             return
         if review_status != "pass":
             self.log("❌ Codex reported QA blocked")
-            self.reroute_to_development(epic_id=epic_id, reason="QA review_status was not pass")
+            self.reroute_to_development(
+                epic_id=epic_id, reason="QA review_status was not pass"
+            )
             return
 
         self.log("Running local checks gate...")
@@ -292,7 +327,9 @@ class LegacyWorkflowPhasesMixin:
         self.log(f"Running BMAD code-review workflow for epic {epic_id}")
         source = self.collect_review_source_snapshot(workspace_root)
         if not source.has_reviewable_source:
-            blocked_text = "No reviewable source found in the current workspace snapshot."
+            blocked_text = (
+                "No reviewable source found in the current workspace snapshot."
+            )
             self.log(f"❌ {blocked_text}")
             self.persist_review_artifact(
                 "code-review",
@@ -319,7 +356,9 @@ class LegacyWorkflowPhasesMixin:
         valid_files.update(self.review_scope_file_names(source.staged_diff))
         valid_files.update(self.review_scope_file_names(source.unstaged_diff))
         result = self.run_codex_session_with_retry(
-            initial_prompt=self.build_code_review_prompt(epic_id, repo_root=workspace_root),
+            initial_prompt=self.build_code_review_prompt(
+                epic_id, repo_root=workspace_root
+            ),
             output_file=output_file,
             cwd=workspace_root,
             reasoning_effort=self.codex_reasoning_effort,
@@ -355,10 +394,14 @@ class LegacyWorkflowPhasesMixin:
         if result.return_code != 0:
             self.log("❌ Codex reported code review failed")
             if result.validation_failure:
-                self.log(f"   Validation error: {to_jsonable(result.validation_failure)}")
+                self.log(
+                    f"   Validation error: {to_jsonable(result.validation_failure)}"
+                )
             self.reroute_to_development(
                 epic_id=epic_id,
-                reason=result.validation_failure.message if result.validation_failure else "code review returned non-zero",
+                reason=result.validation_failure.message
+                if result.validation_failure
+                else "code review returned non-zero",
             )
             return
         if validation_failure or not parsed_output:
@@ -367,7 +410,9 @@ class LegacyWorkflowPhasesMixin:
                 self.log(f"   Validation error: {to_jsonable(validation_failure)}")
             self.reroute_to_development(
                 epic_id=epic_id,
-                reason=validation_failure.message if validation_failure else "invalid code-review output",
+                reason=validation_failure.message
+                if validation_failure
+                else "invalid code-review output",
             )
             return
 
@@ -389,14 +434,18 @@ class LegacyWorkflowPhasesMixin:
         )
         if parsed_output.review_status != "pass":
             self.log("⚠️ Codex did not report CODE_REVIEW_DONE cleanly")
-            self.reroute_to_development(epic_id=epic_id, reason="code review review_status was not pass")
+            self.reroute_to_development(
+                epic_id=epic_id, reason="code review review_status was not pass"
+            )
             return
 
         try:
             self.autopilot_checks(workspace_root)
         except Exception as exc:
             self.log(f"⚠️ Local checks failed after code review: {exc}")
-            self.reroute_to_development(epic_id=epic_id, reason=f"local checks failed after code review: {exc}")
+            self.reroute_to_development(
+                epic_id=epic_id, reason=f"local checks failed after code review: {exc}"
+            )
             return
 
         self.play_sound("review_complete")
@@ -459,7 +508,7 @@ class LegacyWorkflowPhasesMixin:
         elif phase == Phase.BLOCKED:
             self.log("⚠️ BLOCKED - manual intervention needed")
             self.log(
-                f"Fix manually then rerun the launcher: {Path(sys.argv[0]).name} \"{self.config.epic_pattern}\" "
+                f'Fix manually then rerun the launcher: {Path(sys.argv[0]).name} "{self.config.epic_pattern}" '
                 "(resumes by default; use --no-continue to force a fresh start)"
             )
             raise SystemExit(1)

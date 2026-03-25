@@ -9,78 +9,47 @@ Python file.
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
-import math
-import os
-import re
-import shutil
-import subprocess
 import sys
-import tempfile
-import time
-import wave
+from collections.abc import Sequence
 from pathlib import Path
-from textwrap import dedent
-from typing import Any, Callable, Iterable, Optional, Sequence
-
-import yaml
-from pydantic import ValidationError
 
 from internal.cockpit import (
     CockpitCodexSwitcher,
-    cockpit_data_dir_candidates,
-    extract_cockpit_quota_metrics,
-    load_cockpit_codex_store,
-    metric_above_threshold,
-    metric_crossed_threshold,
-    metric_margin_over_threshold,
-    normalize_api_base_url,
-    normalize_bool,
-    normalize_int,
-    normalize_text,
-    pick_best_cockpit_switch_candidate,
-    resolve_cockpit_current_account,
 )
 from internal.models import (
-    AutopilotState,
-    CockpitCodexAccount,
-    CockpitCodexQuota,
-    CockpitCodexStoreSnapshot,
-    CockpitCodexSwitchCandidate,
     CockpitCodexSwitchSettings,
-    CockpitCodexTokens,
-    CodexAttemptResult,
-    EpicDevOutput,
-    PausedContext,
-    PendingPR,
-    Phase,
-    ReviewDecisionOutput,
-    ReviewSourceSnapshot,
-    RuntimeConfig,
-    SprintStatus,
-    SprintStatusValue,
-    StoryDevOutput,
-    StoryTarget,
-    ValidationFailure,
 )
-from internal.utils import read_text, timestamp, to_jsonable, utc_now, write_text
 from internal.runner_environment import RunnerEnvironmentMixin
 from internal.runner_legacy_pr_phases import LegacyPrPhasesMixin
 from internal.runner_legacy_workflow_phases import LegacyWorkflowPhasesMixin
 from internal.runner_review import RunnerReviewMixin
 from internal.runner_state_worktree import RunnerStateWorktreeMixin
-from internal.runner_update import RunnerUpdateMixin
 from internal.runner_story_phases import StoryFlowPhasesMixin
+from internal.runner_update import RunnerUpdateMixin
+from internal.utils import timestamp, write_text
 
 
-class AutopilotRunner(RunnerEnvironmentMixin, RunnerStateWorktreeMixin, RunnerReviewMixin, RunnerUpdateMixin, StoryFlowPhasesMixin, LegacyWorkflowPhasesMixin, LegacyPrPhasesMixin):
+class AutopilotRunner(
+    RunnerEnvironmentMixin,
+    RunnerStateWorktreeMixin,
+    RunnerReviewMixin,
+    RunnerUpdateMixin,
+    StoryFlowPhasesMixin,
+    LegacyWorkflowPhasesMixin,
+    LegacyPrPhasesMixin,
+):
     codex_reasoning_effort = "high"
     commit_split_reasoning_effort = "low"
     sound_profiles: dict[str, list[tuple[float, float]]] = {
         "quota": [(880.0, 0.14), (660.0, 0.14), (440.0, 0.26)],
         "review_ready": [(659.25, 0.12), (783.99, 0.12), (1046.50, 0.20)],
-        "review_complete": [(523.25, 0.10), (659.25, 0.10), (783.99, 0.10), (1046.50, 0.14), (1318.51, 0.26)],
+        "review_complete": [
+            (523.25, 0.10),
+            (659.25, 0.10),
+            (783.99, 0.10),
+            (1046.50, 0.14),
+            (1318.51, 0.26),
+        ],
     }
     worktree_mirror_paths: tuple[Path, ...] = (
         Path(".autopilot"),
@@ -125,7 +94,12 @@ class AutopilotRunner(RunnerEnvironmentMixin, RunnerStateWorktreeMixin, RunnerRe
         self.tmp_dir = self.autopilot_dir / "tmp"
         self.debug_log = self.tmp_dir / "debug.log"
         self.worktree_dir = self.default_worktree_dir()
-        self.sprint_status_file = self.project_root / "_bmad-output" / "implementation-artifacts" / "sprint-status.yaml"
+        self.sprint_status_file = (
+            self.project_root
+            / "_bmad-output"
+            / "implementation-artifacts"
+            / "sprint-status.yaml"
+        )
 
         self.autopilot_dir.mkdir(parents=True, exist_ok=True)
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -162,6 +136,7 @@ class AutopilotRunner(RunnerEnvironmentMixin, RunnerStateWorktreeMixin, RunnerRe
     # General helpers
     # ------------------------------------------------------------------
 
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="BMAD Autopilot")
     parser.add_argument("epic_pattern", nargs="?", default="")
@@ -171,7 +146,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default="",
         help="Start selecting from a later story or epic, e.g. 3-1, 3.1, or 3",
     )
-    parser.add_argument("--continue", dest="continue_run", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--continue", dest="continue_run", action="store_true", help=argparse.SUPPRESS
+    )
     parser.add_argument(
         "--no-continue",
         dest="continue_run",

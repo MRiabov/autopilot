@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import re
 import time
-from pathlib import Path
 
 from .models import AutopilotState, Phase
 
@@ -20,8 +19,13 @@ class LegacyPrPhasesMixin:
             self.state_set(Phase.BLOCKED, None)
             return
 
-        if self.config.parallel_mode >= 1 and self.state_count_pending_prs() >= self.config.max_pending_prs:
-            self.log("⏸️ Pending PR cap reached - waiting for review/merge before starting a new epic")
+        if (
+            self.config.parallel_mode >= 1
+            and self.state_count_pending_prs() >= self.config.max_pending_prs
+        ):
+            self.log(
+                "⏸️ Pending PR cap reached - waiting for review/merge before starting a new epic"
+            )
             self.state_set(Phase.CHECK_PENDING_PR, None)
             return
 
@@ -38,11 +42,15 @@ class LegacyPrPhasesMixin:
             return
 
         if self.state_count_pending_prs() > 0:
-            self.log("🕒 No new epics found yet, but pending PRs still need review/merge")
+            self.log(
+                "🕒 No new epics found yet, but pending PRs still need review/merge"
+            )
             self.state_set(Phase.CHECK_PENDING_PR, None)
             return
 
-        self.log("🎉 No more active epics in sprint-status.yaml and no pending PRs - ALL DONE!")
+        self.log(
+            "🎉 No more active epics in sprint-status.yaml and no pending PRs - ALL DONE!"
+        )
         self.state_set(Phase.DONE, None)
 
     def phase_create_branch(self) -> None:
@@ -55,9 +63,13 @@ class LegacyPrPhasesMixin:
 
         branch_name = f"feature/epic-{epic_id}"
         self.log(f"Creating branch: {branch_name}")
-        wt_path = self.worktree_create(epic_id, branch_name, start_point=f"origin/{self.base_branch}")
+        wt_path = self.worktree_create(
+            epic_id, branch_name, start_point=f"origin/{self.base_branch}"
+        )
         self.set_active_worktree(wt_path)
-        self.run_process(["git", "push", "-u", "origin", branch_name], cwd=wt_path, check=False)
+        self.run_process(
+            ["git", "push", "-u", "origin", branch_name], cwd=wt_path, check=False
+        )
         self.state_set(Phase.DEVELOP_STORIES, epic_id)
         self.log(f"✅ Branch ready: {branch_name}")
 
@@ -83,7 +95,16 @@ class LegacyPrPhasesMixin:
         workspace_root = self.epic_workspace_root(epic_id)
         branch_name = f"feature/epic-{epic_id}"
         result = self.run_process(
-            ["gh", "pr", "create", "--fill", "--title", f"Epic {epic_id}", "--head", branch_name],
+            [
+                "gh",
+                "pr",
+                "create",
+                "--fill",
+                "--title",
+                f"Epic {epic_id}",
+                "--head",
+                branch_name,
+            ],
             cwd=workspace_root,
             check=False,
             capture_output=True,
@@ -168,7 +189,9 @@ class LegacyPrPhasesMixin:
             self.log("")
 
         if not self.config.epic_pattern:
-            self.log("ℹ️ No epic pattern provided - will process active stories from sprint-status.yaml in order")
+            self.log(
+                "ℹ️ No epic pattern provided - will process active stories from sprint-status.yaml in order"
+            )
         if self.config.start_from:
             self.log(f"ℹ️ Start-from selector provided: {self.config.start_from}")
 
@@ -176,7 +199,8 @@ class LegacyPrPhasesMixin:
             self.config.continue_run
             and self.state_file.exists()
             and not self.state.current_story
-            and self.state.phase not in {
+            and self.state.phase
+            not in {
                 Phase.FIND_EPIC,
                 Phase.CREATE_STORY,
                 Phase.DEVELOP_STORIES,
@@ -186,10 +210,16 @@ class LegacyPrPhasesMixin:
                 Phase.DONE,
             }
         )
-        if not self.config.continue_run or not self.state_file.exists() or stale_legacy_state:
+        if (
+            not self.config.continue_run
+            or not self.state_file.exists()
+            or stale_legacy_state
+        ):
             if stale_legacy_state:
                 self.log("ℹ️ Detected stale legacy state; resetting into story flow")
-            self.log("🚀 BMAD Autopilot starting story flow (fresh; use --no-continue to force this)")
+            self.log(
+                "🚀 BMAD Autopilot starting story flow (fresh; use --no-continue to force this)"
+            )
             self.state = AutopilotState.initial(self.config.parallel_mode >= 1)
             self.state_set(Phase.FIND_EPIC, None)
         else:
@@ -215,9 +245,16 @@ class LegacyPrPhasesMixin:
             self.log("")
 
         if not self.config.continue_run or not self.state_file.exists():
-            self.log("🚀 BMAD Autopilot starting legacy flow (fresh; use --no-continue to force this)")
+            self.log(
+                "🚀 BMAD Autopilot starting legacy flow (fresh; use --no-continue to force this)"
+            )
             self.state = AutopilotState.initial(self.config.parallel_mode >= 1)
-            self.state_set(Phase.CHECK_PENDING_PR if self.state_count_pending_prs() > 0 else Phase.FIND_EPIC, None)
+            self.state_set(
+                Phase.CHECK_PENDING_PR
+                if self.state_count_pending_prs() > 0
+                else Phase.FIND_EPIC,
+                None,
+            )
         else:
             self.log("🚀 BMAD Autopilot resuming legacy flow")
 

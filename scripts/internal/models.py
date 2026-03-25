@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -46,10 +46,10 @@ class PendingPR:
     worktree: str
     status: str = "WAIT_REVIEW"
     last_check: str = ""
-    last_copilot_id: Optional[str] = None
+    last_copilot_id: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "PendingPR":
+    def from_dict(cls, data: dict[str, Any]) -> PendingPR:
         return cls(
             epic=str(data.get("epic", "")),
             pr_number=int(data.get("pr_number", 0) or 0),
@@ -76,7 +76,7 @@ class PausedContext:
     phase: str
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "PausedContext":
+    def from_dict(cls, data: dict[str, Any]) -> PausedContext:
         return cls(epic=str(data.get("epic", "")), phase=str(data.get("phase", "")))
 
     def to_dict(self) -> dict[str, Any]:
@@ -113,7 +113,7 @@ class CodexAttemptResult:
 class StoryTarget:
     key: str
     path: Path
-    status: "SprintStatusValue"
+    status: SprintStatusValue
 
 
 class SprintStatusValue(str, Enum):
@@ -135,17 +135,25 @@ class StoryDevOutput(BaseModel):
     blocking_reason: str | None = None
 
     @model_validator(mode="after")
-    def validate_story_contract(self) -> "StoryDevOutput":
+    def validate_story_contract(self) -> StoryDevOutput:
         if self.workflow_status == "stories_complete":
             if self.story_status != "review":
-                raise ValueError("story_status must be review when workflow_status is stories_complete")
+                raise ValueError(
+                    "story_status must be review when workflow_status is stories_complete"
+                )
             if self.blocking_reason is not None:
-                raise ValueError("blocking_reason must be omitted when workflow_status is stories_complete")
+                raise ValueError(
+                    "blocking_reason must be omitted when workflow_status is stories_complete"
+                )
         elif self.workflow_status == "stories_blocked":
             if self.story_status != "in-progress":
-                raise ValueError("story_status must be in-progress when workflow_status is stories_blocked")
+                raise ValueError(
+                    "story_status must be in-progress when workflow_status is stories_blocked"
+                )
             if not (self.blocking_reason or "").strip():
-                raise ValueError("blocking_reason is required when workflow_status is stories_blocked")
+                raise ValueError(
+                    "blocking_reason is required when workflow_status is stories_blocked"
+                )
         return self
 
 
@@ -158,17 +166,25 @@ class EpicDevOutput(BaseModel):
     blocking_reason: str | None = None
 
     @model_validator(mode="after")
-    def validate_epic_contract(self) -> "EpicDevOutput":
+    def validate_epic_contract(self) -> EpicDevOutput:
         if self.workflow_status == "stories_complete":
             if self.story_status != "review":
-                raise ValueError("story_status must be review when workflow_status is stories_complete")
+                raise ValueError(
+                    "story_status must be review when workflow_status is stories_complete"
+                )
             if self.blocking_reason is not None:
-                raise ValueError("blocking_reason must be omitted when workflow_status is stories_complete")
+                raise ValueError(
+                    "blocking_reason must be omitted when workflow_status is stories_complete"
+                )
         elif self.workflow_status == "stories_blocked":
             if self.story_status != "in-progress":
-                raise ValueError("story_status must be in-progress when workflow_status is stories_blocked")
+                raise ValueError(
+                    "story_status must be in-progress when workflow_status is stories_blocked"
+                )
             if not (self.blocking_reason or "").strip():
-                raise ValueError("blocking_reason is required when workflow_status is stories_blocked")
+                raise ValueError(
+                    "blocking_reason is required when workflow_status is stories_blocked"
+                )
         return self
 
 
@@ -180,7 +196,7 @@ class ReviewDecisionOutput(BaseModel):
     reviewed_files: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_review_contract(self) -> "ReviewDecisionOutput":
+    def validate_review_contract(self) -> ReviewDecisionOutput:
         if not self.reviewed_files:
             raise ValueError("reviewed_files must not be empty")
         if any(not str(path).strip() for path in self.reviewed_files):
@@ -207,7 +223,11 @@ class SprintStatus(BaseModel):
         ]
 
     def normalized_story_root(self, project_root: Path) -> Path:
-        root = self.story_location if self.story_location.is_absolute() else project_root / self.story_location
+        root = (
+            self.story_location
+            if self.story_location.is_absolute()
+            else project_root / self.story_location
+        )
         return root.resolve()
 
     def epic_key(self, epic_id: str) -> str:
@@ -237,14 +257,18 @@ class SprintStatus(BaseModel):
 
     def epic_is_complete(self, epic_id: str) -> bool:
         entries = self.epic_story_entries(epic_id)
-        return bool(entries) and all(status == SprintStatusValue.DONE for _key, status in entries)
+        return bool(entries) and all(
+            status == SprintStatusValue.DONE for _key, status in entries
+        )
 
     def epics_pending_retrospective(self) -> list[str]:
         pending: list[str] = []
         for epic_id in self.epic_ids():
             if not self.epic_is_complete(epic_id):
                 continue
-            retrospective_status = self.development_status.get(self.retrospective_key(epic_id))
+            retrospective_status = self.development_status.get(
+                self.retrospective_key(epic_id)
+            )
             if retrospective_status == SprintStatusValue.DONE:
                 continue
             pending.append(epic_id)
@@ -265,7 +289,9 @@ class SprintStatus(BaseModel):
         story_root = self.normalized_story_root(project_root)
         entries = self.epic_story_entries(epic_id)
         if not entries:
-            raise ValueError(f"No story entries found in sprint status for epic {epic_id}")
+            raise ValueError(
+                f"No story entries found in sprint status for epic {epic_id}"
+            )
 
         files: list[Path] = []
         missing: list[Path] = []
@@ -278,7 +304,9 @@ class SprintStatus(BaseModel):
 
         if missing:
             missing_list = ", ".join(str(path) for path in missing)
-            raise ValueError(f"Missing story file(s) for epic {epic_id}: {missing_list}")
+            raise ValueError(
+                f"Missing story file(s) for epic {epic_id}: {missing_list}"
+            )
 
         return files
 
@@ -297,18 +325,18 @@ class SprintStatus(BaseModel):
 class AutopilotState:
     mode: str = "sequential"
     phase: Phase = Phase.FIND_EPIC
-    current_epic: Optional[str] = None
-    current_story: Optional[str] = None
-    current_story_file: Optional[str] = None
+    current_epic: str | None = None
+    current_story: str | None = None
+    current_story_file: str | None = None
     completed_epics: list[str] = field(default_factory=list)
     pending_prs: list[PendingPR] = field(default_factory=list)
-    paused_context: Optional[PausedContext] = None
-    active_phase: Optional[Phase] = None
-    active_epic: Optional[str] = None
-    active_worktree: Optional[str] = None
+    paused_context: PausedContext | None = None
+    active_phase: Phase | None = None
+    active_epic: str | None = None
+    active_worktree: str | None = None
 
     @classmethod
-    def initial(cls, parallel_mode: bool) -> "AutopilotState":
+    def initial(cls, parallel_mode: bool) -> AutopilotState:
         mode = "parallel" if parallel_mode else "sequential"
         return cls(
             mode=mode,
@@ -323,10 +351,14 @@ class AutopilotState:
         )
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any], parallel_mode: bool) -> "AutopilotState":
+    def from_dict(cls, data: dict[str, Any], parallel_mode: bool) -> AutopilotState:
         mode = data.get("mode") or ("parallel" if parallel_mode else "sequential")
         phase = Phase.from_value(data.get("phase"))
-        active_phase = Phase.from_value(data.get("active_phase"), default=None) if data.get("active_phase") else None
+        active_phase = (
+            Phase.from_value(data.get("active_phase"), default=None)
+            if data.get("active_phase")
+            else None
+        )
         if parallel_mode and active_phase is None:
             active_phase = phase
 
@@ -339,7 +371,11 @@ class AutopilotState:
         if isinstance(data.get("paused_context"), dict):
             paused_context = PausedContext.from_dict(data["paused_context"])
 
-        completed = [str(epic) for epic in data.get("completed_epics", []) or [] if epic is not None]
+        completed = [
+            str(epic)
+            for epic in data.get("completed_epics", []) or []
+            if epic is not None
+        ]
 
         return cls(
             mode=mode,
@@ -364,7 +400,9 @@ class AutopilotState:
             "current_story_file": self.current_story_file,
             "completed_epics": list(self.completed_epics),
             "pending_prs": [pr.to_dict() for pr in self.pending_prs],
-            "paused_context": self.paused_context.to_dict() if self.paused_context else None,
+            "paused_context": self.paused_context.to_dict()
+            if self.paused_context
+            else None,
             "active_phase": self.active_phase.value if self.active_phase else None,
             "active_epic": self.active_epic,
             "active_worktree": self.active_worktree,
@@ -381,7 +419,7 @@ class AutopilotState:
         return self.phase
 
     @property
-    def effective_epic(self) -> Optional[str]:
+    def effective_epic(self) -> str | None:
         if self.is_parallel and self.active_epic:
             return self.active_epic
         return self.current_epic

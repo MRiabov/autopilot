@@ -7,10 +7,11 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .models import (
     CockpitCodexAccount,
@@ -130,7 +131,9 @@ def parse_cockpit_codex_account(raw: Any) -> CockpitCodexAccount | None:
         openai_api_key=normalize_text(raw.get("openai_api_key")),
         api_base_url=normalize_text(raw.get("api_base_url") or raw.get("apiBaseUrl")),
         account_id=normalize_text(raw.get("account_id") or raw.get("accountId")),
-        organization_id=normalize_text(raw.get("organization_id") or raw.get("organizationId")),
+        organization_id=normalize_text(
+            raw.get("organization_id") or raw.get("organizationId")
+        ),
         plan_type=normalize_text(raw.get("plan_type") or raw.get("planType")),
         quota=quota,
         tokens=tokens,
@@ -144,12 +147,19 @@ def cockpit_data_dir_candidates(configured_data_dir: str = "") -> list[Path]:
     if configured_data_dir.strip():
         candidates.append(Path(configured_data_dir).expanduser())
 
-    env_override = os.environ.get("AUTOPILOT_COCKPIT_DATA_DIR") or os.environ.get("COCKPIT_TOOLS_DATA_DIR")
+    env_override = os.environ.get("AUTOPILOT_COCKPIT_DATA_DIR") or os.environ.get(
+        "COCKPIT_TOOLS_DATA_DIR"
+    )
     if env_override:
         candidates.append(Path(env_override).expanduser())
 
     if sys.platform == "darwin":
-        candidates.append(Path.home() / "Library" / "Application Support" / "com.antigravity.cockpit-tools")
+        candidates.append(
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "com.antigravity.cockpit-tools"
+        )
     elif os.name == "nt":
         local_app_data = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
         if local_app_data:
@@ -157,8 +167,12 @@ def cockpit_data_dir_candidates(configured_data_dir: str = "") -> list[Path]:
     else:
         xdg_data_home = os.environ.get("XDG_DATA_HOME")
         if xdg_data_home:
-            candidates.append(Path(xdg_data_home).expanduser() / "com.antigravity.cockpit-tools")
-        candidates.append(Path.home() / ".local" / "share" / "com.antigravity.cockpit-tools")
+            candidates.append(
+                Path(xdg_data_home).expanduser() / "com.antigravity.cockpit-tools"
+            )
+        candidates.append(
+            Path.home() / ".local" / "share" / "com.antigravity.cockpit-tools"
+        )
 
     candidates.append(Path.home() / ".antigravity_cockpit")
     seen: set[str] = set()
@@ -186,7 +200,9 @@ def load_json_object(path: Path) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def load_cockpit_codex_store(configured_data_dir: str = "") -> CockpitCodexStoreSnapshot | None:
+def load_cockpit_codex_store(
+    configured_data_dir: str = "",
+) -> CockpitCodexStoreSnapshot | None:
     for data_dir in cockpit_data_dir_candidates(configured_data_dir):
         index_path = data_dir / "codex_accounts.json"
         accounts_dir = data_dir / "codex_accounts"
@@ -194,7 +210,11 @@ def load_cockpit_codex_store(configured_data_dir: str = "") -> CockpitCodexStore
             continue
 
         index_payload = load_json_object(index_path)
-        current_account_id = normalize_text((index_payload or {}).get("current_account_id")) if index_payload else None
+        current_account_id = (
+            normalize_text((index_payload or {}).get("current_account_id"))
+            if index_payload
+            else None
+        )
         auth_payload = load_json_object(data_dir / "auth.json")
 
         account_ids: list[str] = []
@@ -240,7 +260,9 @@ def load_cockpit_codex_store(configured_data_dir: str = "") -> CockpitCodexStore
     return None
 
 
-def resolve_cockpit_current_account(store: CockpitCodexStoreSnapshot) -> CockpitCodexAccount | None:
+def resolve_cockpit_current_account(
+    store: CockpitCodexStoreSnapshot,
+) -> CockpitCodexAccount | None:
     if store.current_account_id:
         for account in store.accounts:
             if account.id == store.current_account_id:
@@ -252,17 +274,25 @@ def resolve_cockpit_current_account(store: CockpitCodexStoreSnapshot) -> Cockpit
 
     if auth_mode == "apikey" or api_key:
         for account in store.accounts:
-            if account.is_api_key_auth() and normalize_text(account.openai_api_key) == api_key:
+            if (
+                account.is_api_key_auth()
+                and normalize_text(account.openai_api_key) == api_key
+            ):
                 return account
 
     tokens = auth_payload.get("tokens")
     if isinstance(tokens, dict):
-        auth_account_id = normalize_text(tokens.get("account_id") or tokens.get("accountId"))
-        auth_org_id = normalize_text(tokens.get("organization_id") or tokens.get("organizationId"))
+        auth_account_id = normalize_text(
+            tokens.get("account_id") or tokens.get("accountId")
+        )
+        auth_org_id = normalize_text(
+            tokens.get("organization_id") or tokens.get("organizationId")
+        )
         if auth_account_id:
             for account in store.accounts:
                 if normalize_text(account.account_id) == auth_account_id and (
-                    not auth_org_id or normalize_text(account.organization_id) == auth_org_id
+                    not auth_org_id
+                    or normalize_text(account.organization_id) == auth_org_id
                 ):
                     return account
         if auth_org_id:
@@ -275,12 +305,17 @@ def resolve_cockpit_current_account(store: CockpitCodexStoreSnapshot) -> Cockpit
     return None
 
 
-def extract_cockpit_quota_metrics(account: CockpitCodexAccount) -> list[tuple[str, str, int]]:
+def extract_cockpit_quota_metrics(
+    account: CockpitCodexAccount,
+) -> list[tuple[str, str, int]]:
     quota = account.quota
     if quota is None:
         return []
 
-    has_presence = quota.hourly_window_present is not None or quota.weekly_window_present is not None
+    has_presence = (
+        quota.hourly_window_present is not None
+        or quota.weekly_window_present is not None
+    )
     metrics: list[tuple[str, str, int]] = []
 
     if not has_presence or quota.hourly_window_present:
@@ -296,7 +331,9 @@ def extract_cockpit_quota_metrics(account: CockpitCodexAccount) -> list[tuple[st
         metrics.append(
             (
                 "secondary_window",
-                format_cockpit_quota_metric_label(quota.weekly_window_minutes, "Weekly"),
+                format_cockpit_quota_metric_label(
+                    quota.weekly_window_minutes, "Weekly"
+                ),
                 clamp_percentage(quota.weekly_percentage),
             )
         )
@@ -313,7 +350,9 @@ def extract_cockpit_quota_metrics(account: CockpitCodexAccount) -> list[tuple[st
     return metrics
 
 
-def metric_crossed_threshold(metric: tuple[str, str, int], primary_threshold: int, secondary_threshold: int) -> bool:
+def metric_crossed_threshold(
+    metric: tuple[str, str, int], primary_threshold: int, secondary_threshold: int
+) -> bool:
     key, _label, percentage = metric
     if key == "primary_window":
         return percentage <= primary_threshold
@@ -322,7 +361,9 @@ def metric_crossed_threshold(metric: tuple[str, str, int], primary_threshold: in
     return False
 
 
-def metric_above_threshold(metric: tuple[str, str, int], primary_threshold: int, secondary_threshold: int) -> bool:
+def metric_above_threshold(
+    metric: tuple[str, str, int], primary_threshold: int, secondary_threshold: int
+) -> bool:
     key, _label, percentage = metric
     if key == "primary_window":
         return percentage > primary_threshold
@@ -331,7 +372,9 @@ def metric_above_threshold(metric: tuple[str, str, int], primary_threshold: int,
     return True
 
 
-def metric_margin_over_threshold(metric: tuple[str, str, int], primary_threshold: int, secondary_threshold: int) -> int | None:
+def metric_margin_over_threshold(
+    metric: tuple[str, str, int], primary_threshold: int, secondary_threshold: int
+) -> int | None:
     key, _label, percentage = metric
     if key == "primary_window":
         return percentage - primary_threshold
@@ -351,13 +394,21 @@ def build_cockpit_switch_candidate(
     metrics = extract_cockpit_quota_metrics(account)
     if not metrics:
         return None
-    if not all(metric_above_threshold(metric, primary_threshold, secondary_threshold) for metric in metrics):
+    if not all(
+        metric_above_threshold(metric, primary_threshold, secondary_threshold)
+        for metric in metrics
+    ):
         return None
 
     margins = [
         margin
         for metric in metrics
-        if (margin := metric_margin_over_threshold(metric, primary_threshold, secondary_threshold)) is not None
+        if (
+            margin := metric_margin_over_threshold(
+                metric, primary_threshold, secondary_threshold
+            )
+        )
+        is not None
     ]
     if not margins:
         return None
@@ -370,7 +421,9 @@ def build_cockpit_switch_candidate(
     )
 
 
-def pick_best_cockpit_switch_candidate(candidates: list[CockpitCodexSwitchCandidate]) -> CockpitCodexAccount | None:
+def pick_best_cockpit_switch_candidate(
+    candidates: list[CockpitCodexSwitchCandidate],
+) -> CockpitCodexAccount | None:
     if not candidates:
         return None
 
@@ -396,7 +449,11 @@ def build_cockpit_auth_file_value(account: CockpitCodexAccount) -> dict[str, Any
             "OPENAI_API_KEY": api_key,
         }
 
-    if not account.tokens or not normalize_text(account.tokens.id_token) or not normalize_text(account.tokens.access_token):
+    if (
+        not account.tokens
+        or not normalize_text(account.tokens.id_token)
+        or not normalize_text(account.tokens.access_token)
+    ):
         raise ValueError("OAuth account is missing tokens")
 
     return {
@@ -407,7 +464,7 @@ def build_cockpit_auth_file_value(account: CockpitCodexAccount) -> dict[str, Any
             "refresh_token": account.tokens.refresh_token,
             "account_id": account.account_id,
         },
-        "last_refresh": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "last_refresh": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
     }
 
 
@@ -435,16 +492,19 @@ def write_cockpit_config_toml(base_dir: Path, api_base_url: str | None) -> None:
         if key_pattern.match(line):
             found = True
             if normalized is not None:
-                updated_lines.append(f'openai_base_url = {json.dumps(normalized)}')
+                updated_lines.append(f"openai_base_url = {json.dumps(normalized)}")
             continue
         updated_lines.append(line)
 
     if normalized is not None and not found:
         if updated_lines and updated_lines[-1].strip():
             updated_lines.append("")
-        updated_lines.append(f'openai_base_url = {json.dumps(normalized)}')
+        updated_lines.append(f"openai_base_url = {json.dumps(normalized)}")
 
-    write_text(config_path, "\n".join(updated_lines).rstrip("\n") + ("\n" if updated_lines else ""))
+    write_text(
+        config_path,
+        "\n".join(updated_lines).rstrip("\n") + ("\n" if updated_lines else ""),
+    )
 
 
 def build_cockpit_keychain_account(base_dir: Path) -> str:
@@ -479,17 +539,26 @@ def write_cockpit_keychain_entry(base_dir: Path, account: CockpitCodexAccount) -
     if output.returncode != 0:
         stderr = (output.stderr or "").strip()
         stdout = (output.stdout or "").strip()
-        raise RuntimeError("Failed to write Codex keychain entry: " + (stderr or stdout or f"status={output.returncode}"))
+        raise RuntimeError(
+            "Failed to write Codex keychain entry: "
+            + (stderr or stdout or f"status={output.returncode}")
+        )
 
 
 def write_cockpit_auth_file(base_dir: Path, account: CockpitCodexAccount) -> None:
     auth_path = base_dir / "auth.json"
-    write_text(auth_path, json.dumps(build_cockpit_auth_file_value(account), indent=2) + "\n")
-    write_cockpit_config_toml(base_dir, account.api_base_url if account.is_api_key_auth() else None)
+    write_text(
+        auth_path, json.dumps(build_cockpit_auth_file_value(account), indent=2) + "\n"
+    )
+    write_cockpit_config_toml(
+        base_dir, account.api_base_url if account.is_api_key_auth() else None
+    )
     write_cockpit_keychain_entry(base_dir, account)
 
 
-def update_cockpit_account_index(store: CockpitCodexStoreSnapshot, account: CockpitCodexAccount) -> None:
+def update_cockpit_account_index(
+    store: CockpitCodexStoreSnapshot, account: CockpitCodexAccount
+) -> None:
     payload = dict(store.index_payload or {})
     version = normalize_text(payload.get("version")) or "1.0"
 
@@ -518,19 +587,27 @@ def update_cockpit_account_index(store: CockpitCodexStoreSnapshot, account: Cock
             "created_at": stored.created_at,
             "last_used": stored.last_used,
         }
-        for stored in (account_map[account_id] for account_id in ordered_ids if account_id in account_map)
+        for stored in (
+            account_map[account_id]
+            for account_id in ordered_ids
+            if account_id in account_map
+        )
     ]
 
     write_text(store.index_path, json.dumps(payload, indent=2) + "\n")
 
 
-def save_cockpit_account_record(store: CockpitCodexStoreSnapshot, account: CockpitCodexAccount) -> None:
+def save_cockpit_account_record(
+    store: CockpitCodexStoreSnapshot, account: CockpitCodexAccount
+) -> None:
     account_path = store.accounts_dir / f"{account.id}.json"
     write_text(account_path, json.dumps(to_jsonable(account), indent=2) + "\n")
 
 
 class CockpitCodexSwitcher:
-    def __init__(self, log: Callable[[str], None], settings: CockpitCodexSwitchSettings) -> None:
+    def __init__(
+        self, log: Callable[[str], None], settings: CockpitCodexSwitchSettings
+    ) -> None:
         self.log = log
         self.settings = settings
 
@@ -544,13 +621,19 @@ class CockpitCodexSwitcher:
             store = load_cockpit_codex_store()
         return bool(store and len(store.accounts) > 1)
 
-    def load_store(self, configured_data_dir: str = "") -> CockpitCodexStoreSnapshot | None:
+    def load_store(
+        self, configured_data_dir: str = ""
+    ) -> CockpitCodexStoreSnapshot | None:
         return load_cockpit_codex_store(configured_data_dir)
 
-    def current_account(self, store: CockpitCodexStoreSnapshot) -> CockpitCodexAccount | None:
+    def current_account(
+        self, store: CockpitCodexStoreSnapshot
+    ) -> CockpitCodexAccount | None:
         return resolve_cockpit_current_account(store)
 
-    def pick_target(self, store: CockpitCodexStoreSnapshot) -> CockpitCodexAccount | None:
+    def pick_target(
+        self, store: CockpitCodexStoreSnapshot
+    ) -> CockpitCodexAccount | None:
         current = self.current_account(store)
         if current is None:
             return None
@@ -560,7 +643,11 @@ class CockpitCodexSwitcher:
             return None
 
         should_switch = any(
-            metric_crossed_threshold(metric, self.settings.primary_threshold, self.settings.secondary_threshold)
+            metric_crossed_threshold(
+                metric,
+                self.settings.primary_threshold,
+                self.settings.secondary_threshold,
+            )
             for metric in current_metrics
         )
         if not should_switch:
@@ -570,15 +657,19 @@ class CockpitCodexSwitcher:
             candidate
             for account in store.accounts
             if account.id != current.id
-            if (candidate := build_cockpit_switch_candidate(
-                account,
-                self.settings.primary_threshold,
-                self.settings.secondary_threshold,
-            ))
+            if (
+                candidate := build_cockpit_switch_candidate(
+                    account,
+                    self.settings.primary_threshold,
+                    self.settings.secondary_threshold,
+                )
+            )
         ]
         return pick_best_cockpit_switch_candidate(candidates)
 
-    def switch_to(self, store: CockpitCodexStoreSnapshot, account: CockpitCodexAccount) -> CockpitCodexAccount:
+    def switch_to(
+        self, store: CockpitCodexStoreSnapshot, account: CockpitCodexAccount
+    ) -> CockpitCodexAccount:
         updated_account = replace(account, last_used=int(time.time()))
         self.log(
             f"[Codex switch] switching accounts: account_id={updated_account.id}, email={updated_account.email}, data_dir={store.data_dir}"

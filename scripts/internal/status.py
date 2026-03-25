@@ -2,26 +2,34 @@ from __future__ import annotations
 
 import argparse
 import json
-import shlex
 import re
+import shlex
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
 
 from .models import AutopilotState
 from .utils import read_text
 
 LOG_ENTRY_RE = re.compile(r"^\[(?P<timestamp>[^\]]+)\]\s*(?P<message>.*)$")
-RUN_START_RE = re.compile(r"BMAD Autopilot (?P<action>starting|resuming) (?P<flow>story|legacy) flow")
+RUN_START_RE = re.compile(
+    r"BMAD Autopilot (?P<action>starting|resuming) (?P<flow>story|legacy) flow"
+)
 CURRENT_PHASE_RE = re.compile(r"Current phase:\s*(?P<phase>[A-Z_]+)")
 PHASE_RE = re.compile(r"PHASE:\s*(?P<phase>[A-Z_]+)")
-FOUND_STORY_RE = re.compile(r"✅ Found story:\s*(?P<story>[^\s]+)\s*\[(?P<status>[^\]]+)\]")
+FOUND_STORY_RE = re.compile(
+    r"✅ Found story:\s*(?P<story>[^\s]+)\s*\[(?P<status>[^\]]+)\]"
+)
 STORY_KEY_RE = re.compile(r"Story key:\s*(?P<story>[^\s]+)")
 STORY_CONTEXT_RE = re.compile(r"📄 Story context:\s*(?P<path>.+)$")
-CODE_REVIEW_WORKFLOW_RE = re.compile(r"Running BMAD code-review workflow for story (?P<story>[^\s]+)")
-STORY_ALREADY_DONE_RE = re.compile(r"⏯️ Story (?P<story>[^\s]+) is already done; selecting the next story")
+CODE_REVIEW_WORKFLOW_RE = re.compile(
+    r"Running BMAD code-review workflow for story (?P<story>[^\s]+)"
+)
+STORY_ALREADY_DONE_RE = re.compile(
+    r"⏯️ Story (?P<story>[^\s]+) is already done; selecting the next story"
+)
 STORY_DONE_RE = re.compile(r"📝 Updated story (?P<story>[^\s]+) status to done")
 REROUTE_RE = re.compile(r"↩️ Rerouting to (?P<target>.+)$")
 VALIDATION_ERROR_RE = re.compile(r"Validation error:\s*(?P<detail>.+)$")
@@ -86,7 +94,9 @@ def parse_log_entries(log_text: str) -> list[LogEntry]:
         if match:
             if current is not None:
                 entries.append(current)
-            current = LogEntry(timestamp=match.group("timestamp"), lines=[match.group("message")])
+            current = LogEntry(
+                timestamp=match.group("timestamp"), lines=[match.group("message")]
+            )
             continue
 
         if current is not None:
@@ -190,12 +200,27 @@ def summarize_run(root: Path) -> RunSummary:
     active_story: str | None = None
     last_event_key: tuple[str, str | None, str | None, str] | None = None
 
-    def emit(timestamp: str, kind: str, message: str, *, story: str | None = None, phase: str | None = None) -> None:
+    def emit(
+        timestamp: str,
+        kind: str,
+        message: str,
+        *,
+        story: str | None = None,
+        phase: str | None = None,
+    ) -> None:
         nonlocal last_event_key
         key = (kind, story, phase, message)
         if key == last_event_key:
             return
-        events.append(RunEvent(timestamp=timestamp, kind=kind, message=message, story=story, phase=phase))
+        events.append(
+            RunEvent(
+                timestamp=timestamp,
+                kind=kind,
+                message=message,
+                story=story,
+                phase=phase,
+            )
+        )
         last_event_key = key
 
     for entry in run_entries:
@@ -212,7 +237,10 @@ def summarize_run(root: Path) -> RunSummary:
                 story=active_story,
                 phase=structured.get("phase"),
             )
-            if event_type == "item.completed" and structured.get("item_type") == "agent_message":
+            if (
+                event_type == "item.completed"
+                and structured.get("item_type") == "agent_message"
+            ):
                 content = structured.get("content")
                 if content and "workflow_status:" in content:
                     if "story_key:" in content:
@@ -226,7 +254,11 @@ def summarize_run(root: Path) -> RunSummary:
             continue
 
         if match := RUN_START_RE.search(message):
-            emit(entry.timestamp, "run_start", f"{match.group('action')} {match.group('flow')} flow")
+            emit(
+                entry.timestamp,
+                "run_start",
+                f"{match.group('action')} {match.group('flow')} flow",
+            )
 
         if match := CURRENT_PHASE_RE.search(message):
             emit(
@@ -250,7 +282,12 @@ def summarize_run(root: Path) -> RunSummary:
             if status == "review" and active_story not in seen_reviewed:
                 reviewed_stories.append(active_story)
                 seen_reviewed.add(active_story)
-            emit(entry.timestamp, "story_selected", f"found story {active_story} [{status}]", story=active_story)
+            emit(
+                entry.timestamp,
+                "story_selected",
+                f"found story {active_story} [{status}]",
+                story=active_story,
+            )
 
         if match := STORY_KEY_RE.search(message):
             active_story = match.group("story")
@@ -263,33 +300,72 @@ def summarize_run(root: Path) -> RunSummary:
             if active_story not in seen_reviewed:
                 reviewed_stories.append(active_story)
                 seen_reviewed.add(active_story)
-            emit(entry.timestamp, "code_review", f"code review started for {active_story}", story=active_story)
+            emit(
+                entry.timestamp,
+                "code_review",
+                f"code review started for {active_story}",
+                story=active_story,
+            )
 
         if match := STORY_ALREADY_DONE_RE.search(message):
-            emit(entry.timestamp, "story_skipped", f"story already done: {match.group('story')}", story=match.group("story"))
+            emit(
+                entry.timestamp,
+                "story_skipped",
+                f"story already done: {match.group('story')}",
+                story=match.group("story"),
+            )
 
         if match := STORY_DONE_RE.search(message):
             story = match.group("story")
             if story not in seen_completed:
                 completed_stories.append(story)
                 seen_completed.add(story)
-            emit(entry.timestamp, "story_completed", f"story marked done: {story}", story=story)
+            emit(
+                entry.timestamp,
+                "story_completed",
+                f"story marked done: {story}",
+                story=story,
+            )
 
         if "✅ Code review passed; story marked done" in message:
             story = active_story
             if story and story not in seen_completed:
                 completed_stories.append(story)
                 seen_completed.add(story)
-            emit(entry.timestamp, "story_completed", f"code review passed; story marked done{f': {story}' if story else ''}", story=story)
+            emit(
+                entry.timestamp,
+                "story_completed",
+                f"code review passed; story marked done{f': {story}' if story else ''}",
+                story=story,
+            )
 
         if match := REROUTE_RE.search(message):
-            emit(entry.timestamp, "reroute", f"rerouted to {match.group('target').strip()}", story=active_story)
+            emit(
+                entry.timestamp,
+                "reroute",
+                f"rerouted to {match.group('target').strip()}",
+                story=active_story,
+            )
 
         if match := VALIDATION_ERROR_RE.search(message):
-            emit(entry.timestamp, "validation_error", f"validation error: {match.group('detail').strip()}", story=active_story)
+            emit(
+                entry.timestamp,
+                "validation_error",
+                f"validation error: {match.group('detail').strip()}",
+                story=active_story,
+            )
 
-        if "❌ Codex reported" in message or "❌ Codex did not produce" in message or "Aborted by user." in message:
-            emit(entry.timestamp, "blocked", message.strip().splitlines()[0], story=active_story)
+        if (
+            "❌ Codex reported" in message
+            or "❌ Codex did not produce" in message
+            or "Aborted by user." in message
+        ):
+            emit(
+                entry.timestamp,
+                "blocked",
+                message.strip().splitlines()[0],
+                story=active_story,
+            )
 
     run_action = None
     run_flow = None
@@ -333,7 +409,9 @@ def _format_state_lines(summary: RunSummary) -> list[str]:
     else:
         lines.append("- completed epics: (none)")
     if state.pending_prs:
-        pending = ", ".join(f"{pr.epic}#{pr.pr_number}:{pr.status}" for pr in state.pending_prs)
+        pending = ", ".join(
+            f"{pr.epic}#{pr.pr_number}:{pr.status}" for pr in state.pending_prs
+        )
         lines.append(f"- pending PRs: {pending}")
     else:
         lines.append("- pending PRs: (none)")
@@ -386,7 +464,9 @@ def render_summary(summary: RunSummary) -> str:
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Summarize the last BMAD Autopilot run")
+    parser = argparse.ArgumentParser(
+        description="Summarize the last BMAD Autopilot run"
+    )
     parser.add_argument(
         "--root",
         type=Path,
